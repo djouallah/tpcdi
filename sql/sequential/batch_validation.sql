@@ -1,0 +1,5 @@
+-- Placeholder — filled in Stage 4 (port of
+--   src/incremental_batches/audit_validation/batch_validation.sql).
+-- run_sequential.py runs this file after every batch; until it is ported it is a no-op
+-- (comment-only, so no statements execute). It will insert the per-batch validation
+-- rows the full audit counts (~24 per batch).
