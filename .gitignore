@@ -1,0 +1,10 @@
+target/
+logs/
+dbt_packages/
+/staging/
+_tpcdi_work/
+downloaded_files/
+**/__pycache__/
+*.pyc
+.venv/
+.env

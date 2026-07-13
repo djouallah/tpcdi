@@ -1,0 +1,16 @@
+tpcdi:
+  target: dev
+  outputs:
+    dev:
+      type: duckrun
+      threads: 1                      # duckrun is single-writer; keep at 1
+      schema: "{{ env_var('DBT_SCHEMA', 'tpcdi') }}"
+      root_path: "{{ env_var('WAREHOUSE_PATH', './warehouse') }}"
+      # No temp_directory override: the duckrun adapter re-applies profile `settings` on every model
+      # over the shared connection, and DuckDB forbids `SET temp_directory` once temp has been used —
+      # so the first model to spill made every later model crash with "Cannot switch temporary
+      # directory after the current one has been used". DuckDB's default (temp beside the cwd, cap =
+      # 90% of that disk) is correct here anyway: the runner's `/mnt` is the same device as `/`, so
+      # pointing spill at /mnt gained nothing. Big spills just use the one 16 GiB disk.
+      storage_options:
+        bearer_token: "{{ env_var('ONELAKE_TOKEN', '') }}"

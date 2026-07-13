@@ -1,0 +1,43 @@
+version: 2
+
+# Base-layer tests: the date/time dimensions and the small reference tables. These are the
+# lookup targets the rest of the star schema joins to, so their keys must be unique and present.
+models:
+  - name: DimDate
+    description: "Date dimension — one row per calendar day."
+    columns:
+      - name: sk_dateid
+        description: "Surrogate key (YYYYMMDD)."
+        tests: [unique, not_null]
+      - name: datevalue
+        description: "Natural date."
+        tests: [unique, not_null]
+
+  - name: DimTime
+    description: "Time dimension — one row per second of the day."
+    columns:
+      - name: sk_timeid
+        description: "Surrogate key (HHMMSS)."
+        tests: [unique, not_null]
+      - name: timevalue
+        tests: [unique, not_null]
+
+  - name: Industry
+    columns:
+      - name: in_id
+        tests: [unique, not_null]
+
+  - name: StatusType
+    columns:
+      - name: st_id
+        tests: [unique, not_null]
+
+  - name: TaxRate
+    columns:
+      - name: tx_id
+        tests: [unique, not_null]
+
+  - name: TradeType
+    columns:
+      - name: tt_id
+        tests: [unique, not_null]

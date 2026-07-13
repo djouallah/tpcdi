@@ -1,0 +1,61 @@
+version: 2
+
+# Silver-layer tests: the FINWIRE-derived dimensions (SCD2 company/security), the non-SCD broker
+# dimension, and the financial facts. SCD2 grain = business key + effectivedate.
+models:
+  - name: DimBroker
+    description: "Broker dimension."
+    columns:
+      - name: sk_brokerid
+        tests: [unique, not_null]
+      - name: brokerid
+        tests: [not_null]
+      - name: iscurrent
+        tests:
+          - accepted_values: {values: [true, false], quote: false}
+
+  - name: DimCompany
+    description: "Company dimension (SCD2 from FINWIRE CMP records)."
+    columns:
+      - name: sk_companyid
+        tests: [unique, not_null]
+      - name: companyid
+        tests: [not_null]
+      - name: status
+        tests:
+          - accepted_values: {values: ['Active', 'Inactive']}
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [companyid, effectivedate]
+
+  - name: DimSecurity
+    description: "Security dimension (SCD2 from FINWIRE SEC records)."
+    columns:
+      - name: sk_securityid
+        tests: [unique, not_null]
+      - name: symbol
+        tests: [not_null]
+      - name: status
+        tests:
+          - accepted_values: {values: ['Active', 'Inactive']}
+      - name: issue
+        tests:
+          - accepted_values: {values: ['COMMON', 'PREF_A', 'PREF_B', 'PREF_C', 'PREF_D']}
+      - name: exchangeid
+        tests:
+          - accepted_values: {values: ['NYSE', 'NASDAQ', 'AMEX', 'PCX']}
+      - name: sk_companyid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimCompany'), field: sk_companyid}
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [symbol, effectivedate]
+
+  - name: Financial
+    description: "Quarterly financials (FINWIRE FIN records), one company version each."
+    columns:
+      - name: sk_companyid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimCompany'), field: sk_companyid}

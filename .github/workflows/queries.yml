@@ -1,0 +1,88 @@
+name: tpc-di-queries
+
+# Run the analytical queries in queries/ against the LIVE OneLake `tpcdi` lakehouse
+# (the per-scale-factor schema tpcdi<sf> that the ETL workflow wrote).
+#
+# This is a SEPARATE, read-only workflow that does NOT interfere with the ETL phase
+# (tpc_di.yml): it never generates data, runs dbt, or writes any table. It only READS
+# the Delta tables the ETL workflow already produced. Two things guarantee isolation:
+#   * duckrun connects with read_only=True, so the run physically cannot write.
+#   * it uses its own concurrency group (below), distinct from the ETL group
+#     `tpcdi-onelake`, so it never cancels or queues behind a load — and since Delta
+#     reads are snapshot-isolated, it is safe even while a load is in progress.
+#
+# Uses the same OIDC secrets as tpc_di.yml: AZURE_CLIENT_ID, AZURE_TENANT_ID.
+on:
+  workflow_dispatch:
+    inputs:
+      scale_factor:
+        description: "Scale factor whose schema to query (tpcdi<sf>)"
+        type: string
+        default: "20"
+  push:
+    # Only when the query side changes — never on ETL/model changes.
+    paths:
+      - "queries/**"
+      - "scripts/run_queries.py"
+      - ".github/workflows/queries.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+# Independent of the ETL group (tpcdi-onelake): never blocks, and is never blocked by, a load.
+concurrency:
+  group: tpcdi-queries
+  cancel-in-progress: true
+
+jobs:
+  queries:
+    runs-on: ubuntu-latest
+    env:
+      WS_ID: 1c52481c-0523-4a5a-bbde-fdc932bd77c2
+      LH_NAME: tpcdi
+      # Query the per-scale-factor schema (tpcdi3, tpcdi300, …) the ETL workflow wrote. Matches
+      # DBT_SCHEMA in tpc_di.yml; pick the SF via the workflow_dispatch input (defaults to 3).
+      DBT_SCHEMA: tpcdi${{ inputs.scale_factor || vars.TPCDI_SF || '20' }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      # The azure extension's default transport fails the OneLake TLS handshake on the runner.
+      AZURE_TRANSPORT_OPTION_TYPE: curl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install duckrun (pulls duckdb + deltalake)
+        run: pip install --quiet -r requirements.txt
+
+      - name: Azure login (OIDC federation — no client secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Resolve the existing 'tpcdi' lakehouse (find-only — never creates or writes)
+        run: |
+          set -euo pipefail
+          BASE="https://api.fabric.microsoft.com/v1/workspaces/$WS_ID/lakehouses"
+          LH_ID="$(az rest --method get --resource https://api.fabric.microsoft.com --url "$BASE" \
+            --query "value[?displayName=='$LH_NAME'].id | [0]" -o tsv 2>/dev/null || true)"
+          if [ -z "${LH_ID:-}" ] || [ "$LH_ID" = "None" ]; then
+            echo "lakehouse '$LH_NAME' not found in workspace $WS_ID — run the ETL workflow (tpc_di.yml) first"
+            exit 1
+          fi
+          echo "WAREHOUSE_PATH=abfss://$WS_ID@onelake.dfs.fabric.microsoft.com/$LH_ID/Tables" >> "$GITHUB_ENV"
+          echo "lakehouse '$LH_NAME' = $LH_ID"
+
+      - name: Acquire a fresh OneLake bearer token
+        run: |
+          TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Run the analytical queries (read-only)
+        run: python ./scripts/run_queries.py --warehouse "$WAREHOUSE_PATH" --schema "$DBT_SCHEMA" --queries queries

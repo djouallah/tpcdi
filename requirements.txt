@@ -1,0 +1,6 @@
+# CI dependencies for the TPC-DI load (tpc_di.yml) and query (queries.yml) workflows.
+# Pinned in one file so actions/setup-python can cache the wheels — a warm cache makes the
+# install near-instant, which also stops GitHub occasionally leaving the install step's
+# spinner stuck at "in_progress" in the UI (it drops the step-completion event on slow steps).
+duckrun[local]
+obstore

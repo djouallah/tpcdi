@@ -1,0 +1,98 @@
+name: dbt-docs
+
+# Publish the dbt docs to GitHub Pages. Regenerates the static catalog READ-ONLY against the live
+# OneLake warehouse (the tpcdi<sf> schema the ETL already built) — no rebuild — then deploys.
+# Manual: pick the scale factor whose schema to document (defaults to 20). Uses the same OIDC
+# secrets as tpc_di.yml (AZURE_CLIENT_ID, AZURE_TENANT_ID).
+on:
+  workflow_dispatch:
+    inputs:
+      scale_factor:
+        description: "Scale factor schema to document (tpcdi<sf>)"
+        type: string
+        default: "20"
+
+# Never blocks / is blocked by the ETL; independent of tpcdi-onelake.
+concurrency:
+  group: tpcdi-pages
+  cancel-in-progress: true
+
+jobs:
+  # Build the static docs. Runs the Azure OIDC login OUTSIDE any GitHub environment, so the OIDC
+  # subject stays `repo:<owner>/<repo>:ref:refs/heads/main` — the one the Fabric federated
+  # credential trusts. (A job bound to the `github-pages` environment would present a different
+  # subject and fail the OneLake login — that's why deploy is a separate job below.)
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      WS_ID: 1c52481c-0523-4a5a-bbde-fdc932bd77c2
+      LH_NAME: tpcdi
+      DBT_SCHEMA: tpcdi${{ inputs.scale_factor || vars.TPCDI_SF || '20' }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      # The azure extension's default transport fails the OneLake TLS handshake on the runner.
+      AZURE_TRANSPORT_OPTION_TYPE: curl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install duckrun (pulls dbt-duckdb + duckdb + deltalake)
+        run: pip install --quiet -r requirements.txt
+
+      - name: Azure login (OIDC federation — no client secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Resolve the 'tpcdi' lakehouse + a fresh OneLake token
+        run: |
+          set -euo pipefail
+          BASE="https://api.fabric.microsoft.com/v1/workspaces/$WS_ID/lakehouses"
+          LH_ID="$(az rest --method get --resource https://api.fabric.microsoft.com --url "$BASE" \
+            --query "value[?displayName=='$LH_NAME'].id | [0]" -o tsv 2>/dev/null || true)"
+          if [ -z "${LH_ID:-}" ] || [ "$LH_ID" = "None" ]; then
+            echo "lakehouse '$LH_NAME' not found in workspace $WS_ID — run the ETL workflow first"; exit 1
+          fi
+          echo "WAREHOUSE_PATH=abfss://$WS_ID@onelake.dfs.fabric.microsoft.com/$LH_ID/Tables" >> "$GITHUB_ENV"
+          TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: dbt docs generate (static — real catalog over the OneLake Delta tables)
+        run: |
+          dbt deps --project-dir .
+          dbt docs generate --static --project-dir . --profiles-dir .
+
+      - name: Assemble the Pages site (static_index.html → index.html)
+        run: |
+          mkdir -p _site
+          cp target/static_index.html _site/index.html
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  # Deploy the built artifact to Pages. GitHub→Pages OIDC only (no Azure), so binding this job to
+  # the `github-pages` environment is fine.
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
