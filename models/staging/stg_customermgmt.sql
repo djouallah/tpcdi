@@ -80,7 +80,7 @@ select
   nullif(lastname, '') as lastname,
   nullif(firstname, '') as firstname,
   nullif(middleinitial, '') as middleinitial,
-  nullif(gender, '') as gender,
+  nullif(upper(gender), '') as gender,
   try_cast(tier as tinyint) as tier,
   try_cast(dob as date) as dob,
   nullif(addressline1, '') as addressline1,

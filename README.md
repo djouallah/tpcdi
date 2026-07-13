@@ -127,6 +127,9 @@ CI (`.github/workflows/tpc_di.yml`) runs the whole thing **on OneLake**, on ever
    adapter's own mid-run GitHub-OIDC token refresh.
 5. `dbt test` validates the built warehouse over `abfss://` — per-model uniqueness, referential
    integrity, SCD2 grain, and enum domains (see below).
+6. `tools/run_audit.py` runs the **end-state audit** — the single-pass-valid subset of the TPC-DI
+   Appendix-A checks — against the finished warehouse plus the PDGF `*_audit.csv` answer keys
+   (see [End-state audit](#end-state-audit)). It is **blocking**: any FAIL fails the job.
 
 The scale factor is `${{ inputs.scale_factor }}` (workflow_dispatch) → repo variable `TPCDI_SF`
 → `20` (the default). It scales to `100` (~10GB seed / ~163M source rows / ~108M warehouse rows)
@@ -202,12 +205,40 @@ heap is `TPCDI_JVM_XMX` (4g in CI).
   NULL/duplicate SK or an orphan FK fails the exact model. Read-only over `delta_scan` views;
   needs only the OneLake bearer token.
 
+### End-state audit
+
+`tools/run_audit.py` restores the **end-state subset** of the TPC-DI Appendix-A *automated audit*
+(ported from `shannon-barrow/databricks-tpc-di`
+`src/incremental_batches/audit_validation/automated_audit.sql`). It loads every PDGF `*_audit.csv`
+answer-key file (which rides along in the seed under `Batch{1,2,3}/`) into an `Audit` table, then
+validates the finished warehouse against it. Read-only, via the same duckrun connection as
+`scripts/run_queries.py`; the answer keys go into a DuckDB TEMP table so nothing touches Delta.
+
+Each check prints `PASS/FAIL/WARN | test | batch | expected | actual`. It runs in CI right after
+`dbt test` and is **blocking** — any FAIL exits nonzero and fails the job.
+
+- **Kept:** every check that reads only the finished warehouse tables and/or the `Audit` answer
+  keys — final/per-batch row counts vs the audit values, attribute-domain checks (gender,
+  marketingnameplate, S&P rating, exchange/issue/status enums), SCD2 date sanity (EndDate
+  alignment, no overlap, end-of-time, IsCurrent), referential integrity, and the FactMarketHistory
+  52-week `52-week-low ≤ day-low ≤ close ≤ day-high ≤ 52-week-high` spot check.
+- **`WARN` (kept, non-fatal):** checks whose correctness depends on per-batch *source*
+  attribution or the Audit `Batch` FirstDay/LastDay date windows — both ambiguous under a
+  single-pass load, where a row's `batchid` is the batch that sourced it, not a load checkpoint.
+- **Skipped:** every check that reads the `DImessages` validation log or the Audit meta-rows —
+  per-batch validation-report counts, phase-complete (PCR) records, `Audit table batches/sources`
+  meta-checks, and the Batch / Data-visibility row-count regressions. A single-pass load produces
+  no `DImessages` log and no between-batch checkpoints, so these have nothing to compare against
+  (see below). The full list is documented at the top of `tools/run_audit.py`.
+
 ## Not yet covered (follow-ups)
 
-- **Per-batch Appendix-A audit + DImessages.** The spec's *automated audit* (Appendix A)
-  and the `DImessages` validation log are inherently per-batch (row counts / phase-complete
+- **Per-batch Appendix-A audit + DImessages.** The parts of the spec's *automated audit* that
+  read the `DImessages` validation log are inherently per-batch (row counts / phase-complete
   records after each of the 3 batches) and assume the 3-separate-runs execution model. Our
-  single-pass load has no between-batch checkpoints, so that audit is a separate, larger build.
+  single-pass load has no between-batch checkpoints or `DImessages` log, so those checks are
+  skipped by `tools/run_audit.py` (the end-state subset above covers everything that *can* be
+  validated on the finished warehouse); the full per-batch audit is a separate, larger build.
 
 ## License
 

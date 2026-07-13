@@ -1,5 +1,9 @@
 -- Daily market history with P/E ratio, yield and trailing 52-week high/low.
--- The 52-week extremes are carried with their date via a struct in the window.
+-- The 52-week extremes are a running min/max over the trailing 365-row window
+-- ordered by date (min_by/max_by carry the extreme's date via a struct). This
+-- matches the audited primary Databricks dialect; the Snowflake_CSV upstream
+-- framed the window over an ORDER BY on price, not date, so it was never a
+-- trailing 52-week window at all (port fixes that bug).
 with companyfinancials as (
   select
     f.sk_companyid,
@@ -26,12 +30,12 @@ dailymarket as (
 markethistory as (
   select
     dm.*,
-    first_value({'dm_low': dm_low, 'dm_date': dm_date}) over (
-      partition by dm_s_symb order by dm_low asc, dm_date asc
+    min_by({'dm_low': dm_low, 'dm_date': dm_date}, dm_low) over (
+      partition by dm_s_symb order by dm_date asc
       rows between 364 preceding and current row
     ) as fiftytwoweeklow,
-    first_value({'dm_high': dm_high, 'dm_date': dm_date}) over (
-      partition by dm_s_symb order by dm_high desc, dm_date asc
+    max_by({'dm_high': dm_high, 'dm_date': dm_date}, dm_high) over (
+      partition by dm_s_symb order by dm_date asc
       rows between 364 preceding and current row
     ) as fiftytwoweekhigh
   from dailymarket dm
