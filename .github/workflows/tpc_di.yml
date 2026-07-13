@@ -30,7 +30,7 @@ on:
       scale_factor:
         description: "TPC-DI scale factor (min 3)"
         type: string
-        default: "20"
+        default: "3"
 
 permissions:
   contents: read
@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # scale_factor input wins, else the repo variable TPCDI_SF, else 20. Keys the seed cache.
-      TPCDI_SF: ${{ inputs.scale_factor || vars.TPCDI_SF || '20' }}
+      TPCDI_SF: ${{ inputs.scale_factor || vars.TPCDI_SF || '3' }}
       TPCDI_GEN_TIMEOUT: '10800'
       TPCDI_JVM_XMX: '4g'
       # Local scratch for the per-table streamer. NB: on the hosted runner `/mnt` is NOT a separate
@@ -61,7 +61,7 @@ jobs:
       # Schema is per-scale-factor (tpcdi3, tpcdi300, …) so every SF gets its own set of Delta
       # tables under Tables/<schema>/ in the one `tpcdi` lakehouse — different SFs never clobber
       # each other. Same expression as TPCDI_SF above (sibling env keys can't reference each other).
-      DBT_SCHEMA: tpcdi${{ inputs.scale_factor || vars.TPCDI_SF || '20' }}
+      DBT_SCHEMA: tpcdi${{ inputs.scale_factor || vars.TPCDI_SF || '3' }}
       # Exported so the adapter (and stream_seed) can re-mint a OneLake token mid-build via GitHub OIDC.
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}

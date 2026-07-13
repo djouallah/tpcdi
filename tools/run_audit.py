@@ -443,19 +443,6 @@ CHECKS += [
 
 
 # ---------------------------------------------------------------------------
-def _mint_seed_secret(raw_con, seed, token):
-    """Mint an Azure secret scoped to the seed path so read_csv over abfss:// audit
-    files authenticates (the warehouse secret duckrun minted is scoped to .../Tables)."""
-    raw_con.execute("INSTALL azure; LOAD azure;")
-    transport = os.environ.get("AZURE_TRANSPORT_OPTION_TYPE")
-    if transport:
-        raw_con.execute(f"SET GLOBAL azure_transport_option_type = '{transport.replace(chr(39), chr(39)*2)}'")
-    raw_con.execute(
-        "CREATE OR REPLACE SECRET tpcdi_seed_audit "
-        "(TYPE AZURE, PROVIDER ACCESS_TOKEN, ACCESS_TOKEN '{}', SCOPE '{}')".format(
-            token.replace("'", "''"), str(seed).replace("'", "''")))
-
-
 def load_audit(raw_con, seed):
     """Create the TEMP `Audit` table and load every Batch*/*_audit.csv answer key.
 
@@ -577,15 +564,18 @@ def main():
 
     conn = duckrun.connect(
         args.warehouse, storage_options=storage_options, schema=args.schema, read_only=True)
-    raw = conn.con  # raw DuckDB connection: bypass duckrun's Delta-DML classifier for our TEMP table
+    # Raw DuckDB connection: we hold the answer keys in a TEMP table and run the checks here to
+    # bypass duckrun's Delta-DML classifier (a plain CREATE TABLE in the primary Delta catalog would
+    # be treated as a Delta overwrite). duckrun's primary catalog already minted an UNSCOPED Azure
+    # secret (and installed the azure extension + transport), which covers the whole storage account
+    # — so read_csv over the seed's Files/ path authenticates with no extra secret.
+    raw = conn.con
 
     print(f"\n  warehouse: {args.warehouse} (schema {args.schema})")
     print(f"  seed:      {args.seed}")
 
-    if str(args.seed).startswith("abfss://"):
-        if not token:
-            sys.exit("ERROR: ONELAKE_TOKEN is empty — needed to read abfss:// audit files")
-        _mint_seed_secret(raw, args.seed, token)
+    if str(args.seed).startswith("abfss://") and not token:
+        sys.exit("ERROR: ONELAKE_TOKEN is empty — needed to read abfss:// audit files")
 
     load_audit(raw, args.seed)
     any_fail = run_checks(raw)
