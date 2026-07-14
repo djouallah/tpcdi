@@ -135,7 +135,9 @@ def run_sql_file(conn, name: str, subs: dict) -> int:
     if not os.path.exists(path):
         print(f"     (skip: {name} not present yet)", flush=True)
         return 0
-    with open(path, "r", encoding="utf-8") as fh:
+    # utf-8-sig strips a UTF-8 BOM if present — a leading BOM would keep duckrun's
+    # `^\s*INSERT` router from recognizing the statement as a Delta write.
+    with open(path, "r", encoding="utf-8-sig") as fh:
         sql = fh.read()
     for k, v in subs.items():
         sql = sql.replace("{{" + k + "}}", str(v))

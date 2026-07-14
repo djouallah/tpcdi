@@ -1,4 +1,4 @@
-﻿-- FULL Appendix-A audit, ported VERBATIM from shannon-barrow/databricks-tpc-di
+-- FULL Appendix-A audit, ported VERBATIM from shannon-barrow/databricks-tpc-di
 --   src/incremental_batches/audit_validation/automated_audit.sql (2419 lines, 130 checks).
 -- This is that file's single `CREATE OR REPLACE TABLE automated_Audit_results AS
 -- select * from ( <130 UNION ALL checks> ) q` statement, with ONLY these mechanical

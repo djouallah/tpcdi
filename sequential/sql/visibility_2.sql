@@ -1,4 +1,4 @@
-﻿-- Data Visibility snapshot #2 (end-of-run). Ported from shannon-barrow/databricks-tpc-di
+-- Data Visibility snapshot #2 (end-of-run). Ported from shannon-barrow/databricks-tpc-di
 --   src/incremental_batches/audit_validation/Appendix_v1.1.0/AppendixC/tpcdi_visibility_2.sql
 -- Records a full set of table row counts (basic + referential-integrity "joined") into
 -- DImessages with MessageType='Visibility_2'. run.py runs this at the very end (sibling of

@@ -55,7 +55,9 @@ def main() -> None:
 
     if not os.path.exists(AUDIT_SQL):
         sys.exit(f"ERROR: audit SQL not found at {AUDIT_SQL}")
-    with open(AUDIT_SQL, "r", encoding="utf-8") as fh:
+    # utf-8-sig strips a UTF-8 BOM if present — a leading BOM would make DuckDB's parser
+    # choke on the first token of the audit SELECT.
+    with open(AUDIT_SQL, "r", encoding="utf-8-sig") as fh:
         sql = fh.read()
 
     conn = duckrun.connect(
