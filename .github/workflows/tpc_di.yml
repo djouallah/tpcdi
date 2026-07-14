@@ -17,24 +17,26 @@ name: tpc-di
 on:
   push:
     branches: ["**"]
-    # The query side is read-only and has its own workflow (queries.yml) — never run the
-    # heavy ETL load just because a query / its runner / docs changed. The sequential mode
-    # is its own workflow — single-pass CI ignores changes under sequential/.
-    paths-ignore:
-      - "singlepass/queries/**"
-      - "singlepass/scripts/run_queries.py"
-      - "sequential/**"
-      - ".github/workflows/queries.yml"
-      - ".github/workflows/tpc_di_sequential.yml"
-      - "**/*.md"
+    # Allowlist, not denylist: the heavy single-pass build + test runs ONLY when the
+    # single-pass code, the shared Python deps, or this workflow itself changed. The seed
+    # is generated once and reused, so with nothing relevant changed there is nothing to
+    # re-test — the workflow simply does not fire. Excluded even within singlepass/: the
+    # read-only query runner (its own queries.yml) and docs.
+    paths:
+      - "singlepass/**"
+      - "!singlepass/queries/**"
+      - "!singlepass/scripts/run_queries.py"
+      - "!singlepass/**/*.md"
+      - "requirements.txt"
+      - ".github/workflows/tpc_di.yml"
   pull_request:
-    paths-ignore:
-      - "singlepass/queries/**"
-      - "singlepass/scripts/run_queries.py"
-      - "sequential/**"
-      - ".github/workflows/queries.yml"
-      - ".github/workflows/tpc_di_sequential.yml"
-      - "**/*.md"
+    paths:
+      - "singlepass/**"
+      - "!singlepass/queries/**"
+      - "!singlepass/scripts/run_queries.py"
+      - "!singlepass/**/*.md"
+      - "requirements.txt"
+      - ".github/workflows/tpc_di.yml"
   workflow_dispatch:
     inputs:
       scale_factor:
