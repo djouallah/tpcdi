@@ -82,8 +82,14 @@ def audit_ddl(seed: str) -> str:
     DValue) and drops any header/junk row via ``try_cast(BatchID) IS NOT NULL``, into a
     persistent Delta table — the sequential batch_validation and the full audit both read it.
     """
-    glob = f"{str(seed).rstrip('/')}/Batch*/*_audit.csv"
-    read = (f"read_csv('{glob}', header=false, all_varchar=true, delim=',', "
+    # Match EVERY *_audit.csv: the per-table answer keys live in Batch*/ subdirs, but the
+    # 'Generator' meta rows (Generator_audit.csv) and the 'Batch' FirstDay/LastDay rows
+    # (Batch{N}_audit.csv) sit at the seed root — the reference loads them all recursively
+    # (dw_init.sql: fileNamePattern => "*_audit.csv"). Globbing only Batch*/ dropped the
+    # root files, so the Audit table was missing the 'Batch' and 'Generator' DataSets.
+    base = str(seed).rstrip("/")
+    globs = f"['{base}/*_audit.csv', '{base}/Batch*/*_audit.csv']"
+    read = (f"read_csv({globs}, header=false, all_varchar=true, delim=',', "
             "quote='', escape='', nullstr='', null_padding=true, filename=false)")
     return f"""
 CREATE OR REPLACE TABLE Audit AS

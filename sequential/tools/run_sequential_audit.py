@@ -144,25 +144,28 @@ def _diagnostics(raw) -> None:
         ("DimCustomer batchid distribution",
          "SELECT batchid, count(*) AS rows, count(*) FILTER (WHERE tier NOT IN (1,2,3) OR tier IS NULL) "
          "AS bad_tier FROM DimCustomer GROUP BY batchid ORDER BY batchid"),
-        # DOB alerts recomputed straight from DimCustomer (what audit_alerts SHOULD emit),
-        # split into too-old vs too-young, so the 37-vs-8 gap is attributable.
-        ("DOB recompute from DimCustomer (distinct customer per batch): too_old / too_young",
-         "SELECT batchid, "
-         "count(*) FILTER (WHERE datediff('year', dob, batchdate) >= 100) AS too_old, "
-         "count(*) FILTER (WHERE dob > batchdate) AS too_young "
-         "FROM (SELECT DISTINCT dc.customerid, dc.dob, bd.batchdate, dc.batchid "
-         "      FROM DimCustomer dc JOIN BatchDate bd USING (batchid)) x GROUP BY batchid ORDER BY batchid"),
-        ("DOB flagged samples (batch 1): customerid, dob, batchdate, yrs",
-         "SELECT DISTINCT dc.customerid, dc.dob, bd.batchdate, datediff('year', dob, batchdate) AS yrs "
+        ("C_DOB_TO vs C_DOB_TY answer keys (batch 1)",
+         "SELECT attribute, sum(Value) AS n FROM Audit WHERE DataSet='DimCustomer' "
+         "AND BatchID=1 AND attribute IN ('C_DOB_TO','C_DOB_TY') GROUP BY attribute"),
+        # Is a bad DOB genuinely in the source, or introduced by the historical forward-fill?
+        # Show DOB-year histogram of batch-1 flagged customers, and compare each flagged
+        # customer's DimCustomer dob vs its raw stg_customermgmt dob(s).
+        ("DOB-year histogram of batch-1 flagged DISTINCT customers",
+         "SELECT year(dob) AS dob_year, count(DISTINCT customerid) AS customers "
          "FROM DimCustomer dc JOIN BatchDate bd USING (batchid) "
-         "WHERE dc.batchid = 1 AND (datediff('year', dob, batchdate) >= 100 OR dob > batchdate) "
-         "ORDER BY yrs LIMIT 15"),
-        ("Tier recompute from DimCustomer batch 1 (latest per customer): null vs out-of-range",
-         "SELECT count(*) FILTER (WHERE tier IS NULL) AS null_tier, "
-         "count(*) FILTER (WHERE tier IS NOT NULL AND tier NOT IN (1,2,3)) AS oor_tier "
-         "FROM (SELECT customerid, tier FROM DimCustomer WHERE batchid = 1 "
-         "      QUALIFY row_number() OVER (PARTITION BY customerid, batchid ORDER BY enddate DESC) = 1) x "
-         "WHERE tier IS NULL OR tier NOT IN (1,2,3)"),
+         "WHERE batchid=1 AND (datediff('year', dob, batchdate) >= 100 OR dob > batchdate) "
+         "GROUP BY year(dob) ORDER BY customers DESC LIMIT 12"),
+        ("Flagged customers: DimCustomer dob  vs  raw stg_customermgmt dob(s) (10 samples)",
+         "SELECT dc.customerid, dc.dob AS dimcust_dob, "
+         "  string_agg(DISTINCT cast(s.dob AS varchar), ',') AS stg_dobs, "
+         "  string_agg(DISTINCT s.actiontype, ',') AS actions "
+         "FROM DimCustomer dc JOIN BatchDate bd USING (batchid) "
+         "LEFT JOIN stg_customermgmt s ON s.customerid = dc.customerid "
+         "WHERE dc.batchid=1 AND (datediff('year', dc.dob, bd.batchdate) >= 100 OR dc.dob > bd.batchdate) "
+         "GROUP BY dc.customerid, dc.dob ORDER BY dc.customerid LIMIT 10"),
+        ("Tier: distinct customers with ANY bad-tier version, batch 1 (producer logic)",
+         "SELECT count(DISTINCT customerid) AS flagged FROM DimCustomer "
+         "WHERE batchid=1 AND (tier NOT IN (1,2,3) OR tier IS NULL)"),
     ]
     for label, sql in queries:
         try:
