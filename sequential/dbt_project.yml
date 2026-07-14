@@ -1,0 +1,29 @@
+name: 'tpcdi_seq'
+version: '1.0.0'
+config-version: 2
+
+profile: 'tpcdi_seq'
+
+# This is a SEPARATE dbt project from the single-pass one at the repo root. The ONLY
+# thing shared between them is the raw seed data (TPCDI_DIR). Macros and reference models
+# are duplicated here on purpose so the two projects evolve independently.
+vars:
+  tpcdi_dir: "{{ env_var('TPCDI_DIR', './staging') }}"
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  tpcdi_seq:
+    +materialized: table
+    # reference: batch-1 static (references + FinWire-derived dims + XML staging), built
+    #   once by batch 1 and never rebuilt. incremental: bronze + dim/fact models, run in
+    #   every batch (batch 1 --full-refresh, batches 2-3 --select tag:incremental).
+    reference:
+      +tags: [reference]
+    bronze:
+      +tags: [incremental]
+    incremental:
+      +tags: [incremental]

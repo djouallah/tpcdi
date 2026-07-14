@@ -53,6 +53,9 @@ import duckrun
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.dirname(HERE)
 SQLDIR = os.path.join(PROJ, "sql", "sequential")
+# The sequential dbt project is fully separate from the single-pass project at the repo
+# root — its own dbt_project.yml/profiles.yml/macros/models. Only the raw seed is shared.
+SEQ_PROJ = os.path.join(PROJ, "sequential")
 
 BATCHES = (1, 2, 3)
 
@@ -142,18 +145,22 @@ def run_sql_file(conn, name: str, subs: dict) -> int:
     return n
 
 
-def dbt_run(select: str, batch: int, env: dict, full_refresh: bool) -> None:
-    cmd = ["dbt", "run", "--project-dir", PROJ, "--profiles-dir", PROJ,
-           "--select", select, "--vars", f"{{batch: {batch}}}"]
-    if full_refresh:
+def dbt_run(batch: int, env: dict) -> None:
+    # Batch 1 = --full-refresh over the whole sequential project (references + the
+    # historical branch of every incremental model). Batches 2-3 select only the
+    # bronze + dim/fact models (tag:incremental); the reference models are batch-1 static.
+    cmd = ["dbt", "run", "--project-dir", SEQ_PROJ, "--profiles-dir", SEQ_PROJ,
+           "--vars", f"{{batch: {batch}}}"]
+    if batch == 1:
         cmd.append("--full-refresh")
+    else:
+        cmd += ["--select", "tag:incremental"]
     subprocess.run(cmd, check=True, env=env)
 
 
 def dbt_test(env: dict) -> None:
     subprocess.run(
-        ["dbt", "test", "--project-dir", PROJ, "--profiles-dir", PROJ,
-         "--select", "tag:sequential"],
+        ["dbt", "test", "--project-dir", SEQ_PROJ, "--profiles-dir", SEQ_PROJ],
         check=True, env=env)
 
 
@@ -167,6 +174,9 @@ def main() -> None:
     ap.add_argument("--skip-generate", action="store_true")
     ap.add_argument("--skip-test", action="store_true")
     ap.add_argument("--skip-audit", action="store_true")
+    ap.add_argument("--batches", type=int, default=3, choices=(1, 2, 3),
+                    help="run batches 1..N (default 3; use 1 to validate the historical "
+                         "load before the incremental branches are complete)")
     ap.add_argument("--init-only", action="store_true",
                     help="create Audit + DImessages and exit (skeleton smoke test)")
     ap.add_argument("--force", action="store_true", help="force data regeneration")
@@ -208,11 +218,10 @@ def main() -> None:
         return
 
     timings: dict[str, float] = {}
-    for batch in BATCHES:
-        select = "tag:sequential" if batch == 1 else "tag:sequential,tag:incremental"
-        print(f"\n>> batch {batch}: dbt run --select {select}", flush=True)
+    for batch in BATCHES[:args.batches]:
+        print(f"\n>> batch {batch}: dbt run (sequential project)", flush=True)
         t0 = time.perf_counter()
-        dbt_run(select, batch, env, full_refresh=(batch == 1))
+        dbt_run(batch, env)
         # See new tables before the between-batch validation reads them.
         conn.refresh()
         n_pcr = run_sql_file(conn, "batch_complete.sql", {"batch_id": batch})

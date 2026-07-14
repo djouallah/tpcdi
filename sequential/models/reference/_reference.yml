@@ -1,0 +1,91 @@
+version: 2
+
+# Reference-layer tests (copied from the single-pass project's _base.yml + _silver.yml).
+# These batch-1-static models are the lookup targets the sequential star schema joins to.
+models:
+  - name: DimDate
+    columns:
+      - name: sk_dateid
+        tests: [unique, not_null]
+      - name: datevalue
+        tests: [unique, not_null]
+
+  - name: DimTime
+    columns:
+      - name: sk_timeid
+        tests: [unique, not_null]
+      - name: timevalue
+        tests: [unique, not_null]
+
+  - name: Industry
+    columns:
+      - name: in_id
+        tests: [unique, not_null]
+
+  - name: StatusType
+    columns:
+      - name: st_id
+        tests: [unique, not_null]
+
+  - name: TaxRate
+    columns:
+      - name: tx_id
+        tests: [unique, not_null]
+
+  - name: TradeType
+    columns:
+      - name: tt_id
+        tests: [unique, not_null]
+
+  - name: DimBroker
+    columns:
+      - name: sk_brokerid
+        tests: [unique, not_null]
+      - name: brokerid
+        tests: [not_null]
+      - name: iscurrent
+        tests:
+          - accepted_values: {values: [true, false], quote: false}
+
+  - name: DimCompany
+    columns:
+      - name: sk_companyid
+        tests: [unique, not_null]
+      - name: companyid
+        tests: [not_null]
+      - name: status
+        tests:
+          - accepted_values: {values: ['Active', 'Inactive']}
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [companyid, effectivedate]
+
+  - name: DimSecurity
+    columns:
+      - name: sk_securityid
+        tests: [unique, not_null]
+      - name: symbol
+        tests: [not_null]
+      - name: status
+        tests:
+          - accepted_values: {values: ['Active', 'Inactive']}
+      - name: issue
+        tests:
+          - accepted_values: {values: ['COMMON', 'PREF_A', 'PREF_B', 'PREF_C', 'PREF_D']}
+      - name: exchangeid
+        tests:
+          - accepted_values: {values: ['NYSE', 'NASDAQ', 'AMEX', 'PCX']}
+      - name: sk_companyid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimCompany'), field: sk_companyid}
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [symbol, effectivedate]
+
+  - name: Financial
+    columns:
+      - name: sk_companyid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimCompany'), field: sk_companyid}

@@ -17,21 +17,3 @@ clean-targets: ["target", "dbt_packages"]
 models:
   tpcdi:
     +materialized: table
-    # Two execution modes share this one project (mirroring upstream single_batch/ vs
-    # incremental_batches/). Tags select the mode:
-    #   singlepass — the existing end-state load (one dbt run over all 3 batches).
-    #   sequential — the spec's 3-batch load (run_sequential.py).
-    # The Batch1-only reference / FinWire-derived / XML-staging models are REUSED by
-    # both modes (dbt tags are additive), so they carry both tags; the audit also needs
-    # them present in the sequential (_seq) schema. The single-pass incremental dims/
-    # facts are singlepass-only — sequential has its own seq_* models (added in later
-    # stages). Single-pass entrypoints exclude the sequential tree by PATH, since the
-    # shared models here also carry the sequential tag.
-    base:
-      +tags: [singlepass, sequential]
-    silver:
-      +tags: [singlepass, sequential]
-    staging:
-      +tags: [singlepass, sequential]
-    incremental:
-      +tags: [singlepass]

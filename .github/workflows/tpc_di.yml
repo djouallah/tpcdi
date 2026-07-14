@@ -241,3 +241,69 @@ jobs:
             logs/
             target/
           if-no-files-found: ignore
+
+  # Second mode: the sequential 3-batch load (the sequential/ dbt project) into a
+  # SEPARATE schema (tpcdi<SF>_seq). Runs AFTER the single-pass job so the OneLake seed
+  # is already present (it reuses it, --skip-generate). Different schema => no clash with
+  # the single-pass warehouse. During the build-out this validates only the historical
+  # load (--batches 1); it flips to the full 3 batches + audit once the merge branches land.
+  tpc-di-sequential:
+    needs: tpc-di
+    runs-on: ubuntu-latest
+    env:
+      TPCDI_SF: ${{ inputs.scale_factor || vars.TPCDI_SF || '3' }}
+      WS_ID: 1c52481c-0523-4a5a-bbde-fdc932bd77c2
+      LH_NAME: tpcdi
+      # Sequential warehouse schema — sibling of the single-pass tpcdi<SF>.
+      DBT_SCHEMA: tpcdi${{ inputs.scale_factor || vars.TPCDI_SF || '3' }}_seq
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_TRANSPORT_OPTION_TYPE: curl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install duckrun (dbt-duckdb + duckdb + deltalake) + obstore
+        run: pip install --quiet -r requirements.txt
+      - name: Azure login (OIDC federation — no client secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Resolve the 'tpcdi' lakehouse OneLake paths (seed already streamed by tpc-di)
+        run: |
+          set -euo pipefail
+          BASE="https://api.fabric.microsoft.com/v1/workspaces/$WS_ID/lakehouses"
+          LH_ID="$(az rest --method get --resource https://api.fabric.microsoft.com --url "$BASE" \
+            --query "value[?displayName=='$LH_NAME'].id | [0]" -o tsv 2>/dev/null)"
+          if [ -z "${LH_ID:-}" ] || [ "$LH_ID" = "None" ]; then
+            echo "lakehouse '$LH_NAME' not found"; exit 1
+          fi
+          ROOT="abfss://$WS_ID@onelake.dfs.fabric.microsoft.com/$LH_ID"
+          {
+            echo "WAREHOUSE_PATH=$ROOT/Tables"
+            echo "TPCDI_DIR=$ROOT/Files/tpcdi/sf${TPCDI_SF}"
+          } >> "$GITHUB_ENV"
+          echo "lakehouse '$LH_NAME' = $LH_ID"
+      - name: Acquire a fresh OneLake bearer token
+        run: |
+          TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+      - name: dbt deps (sequential project — dbt_utils)
+        run: dbt deps --project-dir sequential --profiles-dir sequential
+      - name: Sequential load + dbt test (historical batch only during build-out)
+        run: python ./scripts/run_sequential.py --skip-generate --target onelake --batches 1
+      - name: Upload sequential logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tpc-di-sequential-logs
+          path: |
+            sequential/logs/
+            sequential/target/
+          if-no-files-found: ignore
