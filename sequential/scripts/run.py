@@ -25,20 +25,20 @@ mutually exclusive per run; keep them in separate schemas (e.g. ``tpcdi3`` vs
 ``--full-refresh`` (rebuilding every table from Batch1) and the Audit/DImessages tables
 are ``CREATE OR REPLACE``-d at init — no folder deletion, so it is OneLake-safe.
 
-Reuses the same duckrun connection/env handling as scripts/run_queries.py
+Reuses the same duckrun connection/env handling as the single-pass runner
 (``WAREHOUSE_PATH``, ``ONELAKE_TOKEN``, ``DBT_SCHEMA``).
 
 Local::
 
     WAREHOUSE_PATH=./warehouse TPCDI_DIR=./staging DBT_SCHEMA=tpcdi3_seq \\
-        python scripts/run_sequential.py --sf 3
+        python sequential/scripts/run.py --sf 3
 
 OneLake::
 
     WAREHOUSE_PATH=abfss://<ws>@onelake.dfs.fabric.microsoft.com/<lh>/Tables \\
       TPCDI_DIR=abfss://<ws>@onelake.dfs.fabric.microsoft.com/<lh>/Files/tpcdi/sf3 \\
       ONELAKE_TOKEN=... DBT_SCHEMA=tpcdi3_seq \\
-      python scripts/run_sequential.py --sf 3 --target onelake
+      python sequential/scripts/run.py --sf 3 --target onelake
 """
 from __future__ import annotations
 
@@ -51,11 +51,12 @@ import time
 import duckrun
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PROJ = os.path.dirname(HERE)
-SQLDIR = os.path.join(PROJ, "sql", "sequential")
-# The sequential dbt project is fully separate from the single-pass project at the repo
-# root — its own dbt_project.yml/profiles.yml/macros/models. Only the raw seed is shared.
-SEQ_PROJ = os.path.join(PROJ, "sequential")
+# The sequential/ folder IS a complete, self-contained dbt project (its own
+# dbt_project.yml / profiles.yml / macros / models / scripts / sql / tools). Nothing is
+# shared with the single-pass project except the raw seed data.
+SEQ_PROJ = os.path.dirname(HERE)      # the sequential/ dbt project dir
+PROJ = SEQ_PROJ
+SQLDIR = os.path.join(SEQ_PROJ, "sql")
 
 BATCHES = (1, 2, 3)
 

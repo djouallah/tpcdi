@@ -22,8 +22,8 @@ on:
   push:
     # Only when the query side changes — never on ETL/model changes.
     paths:
-      - "queries/**"
-      - "scripts/run_queries.py"
+      - "singlepass/queries/**"
+      - "singlepass/scripts/run_queries.py"
       - ".github/workflows/queries.yml"
 
 permissions:
@@ -85,4 +85,4 @@ jobs:
           echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
       - name: Run the analytical queries (read-only)
-        run: python ./scripts/run_queries.py --warehouse "$WAREHOUSE_PATH" --schema "$DBT_SCHEMA" --queries queries
+        run: python ./singlepass/scripts/run_queries.py --warehouse "$WAREHOUSE_PATH" --schema "$DBT_SCHEMA" --queries singlepass/queries

@@ -15,14 +15,14 @@ on:
     # The query side is read-only and has its own workflow (queries.yml) — never run the
     # heavy ETL load just because a query / its runner / docs changed.
     paths-ignore:
-      - "queries/**"
-      - "scripts/run_queries.py"
+      - "singlepass/queries/**"
+      - "singlepass/scripts/run_queries.py"
       - ".github/workflows/queries.yml"
       - "**/*.md"
   pull_request:
     paths-ignore:
-      - "queries/**"
-      - "scripts/run_queries.py"
+      - "singlepass/queries/**"
+      - "singlepass/scripts/run_queries.py"
       - ".github/workflows/queries.yml"
       - "**/*.md"
   workflow_dispatch:
@@ -143,7 +143,7 @@ jobs:
       - name: Generate + stream the seed to OneLake (per-table, resumable)
         run: |
           sudo mkdir -p /mnt/tpcdi && sudo chown "$USER:$USER" /mnt/tpcdi
-          python ./scripts/stream_seed.py --sf "${TPCDI_SF}" --prefix "tpcdi/sf${TPCDI_SF}"
+          python ./singlepass/scripts/stream_seed.py --sf "${TPCDI_SF}" --prefix "tpcdi/sf${TPCDI_SF}"
 
       # Install dbt package deps (dbt_utils) before any dbt command — `dbt run` parses packages.yml
       # and aborts if the packages aren't installed. Offline/fast; no OneLake token needed.
@@ -201,7 +201,7 @@ jobs:
       - name: dbt docs generate (static — real catalog over the OneLake Delta tables)
         run: dbt docs generate --static --project-dir singlepass --profiles-dir singlepass
       - name: Verify the tpc-di catalog carries Delta table stats
-        run: python ./tools/check_catalog_stats.py singlepass/target/catalog.json tpcdi
+        run: python ./singlepass/tools/check_catalog_stats.py singlepass/target/catalog.json tpcdi
       - name: Upload tpc-di docs (static stats page)
         uses: actions/upload-artifact@v4
         with:
@@ -230,7 +230,7 @@ jobs:
           echo "::add-mask::$TOKEN"
           echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
       - name: Audit (Appendix-A end-state subset — blocking)
-        run: python ./tools/run_audit.py
+        run: python ./singlepass/tools/run_audit.py
 
       - name: Upload logs (always)
         if: always()
@@ -297,7 +297,7 @@ jobs:
       - name: dbt deps (sequential project — dbt_utils)
         run: dbt deps --project-dir sequential --profiles-dir sequential
       - name: Sequential load + dbt test (historical batch only during build-out)
-        run: python ./scripts/run_sequential.py --skip-generate --target onelake --batches 1
+        run: python ./sequential/scripts/run.py --skip-generate --target onelake --batches 1
       - name: Upload sequential logs (always)
         if: always()
         uses: actions/upload-artifact@v4
