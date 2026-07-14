@@ -193,6 +193,15 @@ def _diagnostics(raw) -> None:
         ("Tier: distinct customers with ANY bad-tier version, batch 1 (producer logic)",
          "SELECT count(DISTINCT customerid) AS flagged FROM DimCustomer "
          "WHERE batchid=1 AND (tier NOT IN (1,2,3) OR tier IS NULL)"),
+        ("Tier value distribution among batch-1 bad-tier customers",
+         "SELECT coalesce(cast(tier AS varchar), 'NULL') AS tier, count(DISTINCT customerid) AS customers "
+         "FROM DimCustomer WHERE batchid=1 AND (tier NOT IN (1,2,3) OR tier IS NULL) "
+         "GROUP BY tier ORDER BY customers DESC"),
+        # Customers whose ONLY bad-tier version is non-current (a bad tier that appears in an
+        # intermediate SCD2 version but not the latest) — a candidate for the 252-vs-251 gap.
+        ("DOB recompute with the birthday-accurate rule (should be 8 for batch 1)",
+         "SELECT count(DISTINCT customerid) AS n FROM DimCustomer dc JOIN BatchDate bd USING (batchid) "
+         "WHERE batchid=1 AND (dob <= batchdate - INTERVAL 100 YEAR OR dob > batchdate)"),
     ]
     for label, sql in queries:
         try:

@@ -38,7 +38,12 @@ FROM (
     concat('C_ID = ', customerid, ', C_DOB = ', dob)
   FROM DimCustomer dc
   JOIN batchdate bd USING (batchid)
-  WHERE datediff('year', dob, batchdate) >= 100 OR dob > batchdate
+  -- "100+ years old" = has actually reached the 100th birthday. Databricks
+  -- datediff(YEAR, dob, batchdate) counts FULL years elapsed, but DuckDB
+  -- datediff('year', ...) counts the CALENDAR-year difference (year(b) - year(a)),
+  -- which over-flags anyone born in batch_year-100 whose birthday falls after the
+  -- batch date (they're really 99). The birthday-accurate test is dob <= batchdate - 100y.
+  WHERE dob <= batchdate - INTERVAL 100 YEAR OR dob > batchdate
   UNION ALL
   SELECT DISTINCT
     batchid,
