@@ -16,9 +16,11 @@ on:
   workflow_dispatch:
     inputs:
       scale_factor:
+        # Restricted to the upstream-validated scale factors the ETL builds — no arbitrary SF.
         description: "Scale factor whose schema to query (tpcdi<sf>)"
-        type: string
-        default: "20"
+        type: choice
+        options: ["10", "100", "1000", "5000", "10000", "20000"]
+        default: "10"
   push:
     # Only when the query side changes — never on ETL/model changes.
     paths:
@@ -42,8 +44,8 @@ jobs:
       WS_ID: 1c52481c-0523-4a5a-bbde-fdc932bd77c2
       LH_NAME: tpcdi
       # Query the per-scale-factor schema (tpcdi3, tpcdi300, …) the ETL workflow wrote. Matches
-      # DBT_SCHEMA in tpc_di.yml; pick the SF via the workflow_dispatch input (defaults to 3).
-      DBT_SCHEMA: tpcdi${{ inputs.scale_factor || vars.TPCDI_SF || '20' }}
+      # DBT_SCHEMA in tpc_di.yml; pick the SF via the workflow_dispatch input (defaults to 10).
+      DBT_SCHEMA: tpcdi${{ inputs.scale_factor || vars.TPCDI_SF || '10' }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       # The azure extension's default transport fails the OneLake TLS handshake on the runner.

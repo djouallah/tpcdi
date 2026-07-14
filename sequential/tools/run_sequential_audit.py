@@ -210,8 +210,8 @@ def _diagnostics(raw) -> None:
         ("  ^ those customers: per-action tier in raw stg (does the NEW action carry a tier?)",
          "SELECT dc.customerid, "
          "  string_agg(s.actiontype || '=' || coalesce(cast(s.tier AS varchar),'-'), ', ' ORDER BY s.update_ts) AS action_tiers "
-         "FROM DimCustomer dc JOIN stg_customermgmt s ON s.customerid=dc.customerid "
-         "WHERE dc.batchid=1 AND dc.tier IS NULL "
+         "FROM (SELECT DISTINCT customerid FROM DimCustomer WHERE batchid=1 AND tier IS NULL) dc "
+         "JOIN stg_customermgmt s ON s.customerid=dc.customerid "
          "GROUP BY dc.customerid HAVING max(s.tier) IN (1,2,3) LIMIT 12"),
         ("Of those NULL-tier-but-valid-stg customers, how many have the tier on their NEW action",
          "SELECT count(*) FILTER (WHERE new_tier IN (1,2,3)) AS tier_on_new, "
@@ -220,26 +220,46 @@ def _diagnostics(raw) -> None:
          "  FROM DimCustomer dc JOIN stg_customermgmt s ON s.customerid=dc.customerid "
          "  WHERE dc.batchid=1 AND dc.tier IS NULL "
          "  GROUP BY dc.customerid HAVING max(s.tier) IN (1,2,3)) x"),
+        # --- Tier-alert reconciliation (Step 1 & Step 3 of the runbook) ---
+        # Step 1: rule out duplicate answer-key ingestion. The tier check sums Audit.Value,
+        # so a row loaded twice inflates 'expected'. Expect exactly ONE row per batch.
+        ("Step1  Audit C_TIER_INV rows per batch (must be 1 row/batch; >1 = dup ingestion)",
+         "SELECT batchid, count(*) AS rows, sum(value) AS total FROM Audit "
+         "WHERE dataset='DimCustomer' AND attribute='C_TIER_INV' GROUP BY batchid ORDER BY batchid"),
+        # Step 3(a): collapse victims — NEW lacks tier (counted by the key) but a same-day
+        # valid UPDCUST erased the NULL version via WHERE effectivedate<enddate, so no bad
+        # version survives -> 1 expected, 0 alerts. This is the b1 gap's prime candidate.
+        ("Step3a collapse victims b1 (NEW no-tier, no surviving bad version = expected-not-alerted)",
+         "SELECT count(*) AS victims FROM (SELECT DISTINCT customerid FROM stg_customermgmt "
+         "  WHERE actiontype='NEW' AND tier IS NULL) s "
+         "WHERE NOT EXISTS (SELECT 1 FROM DimCustomer d WHERE d.customerid=s.customerid "
+         "  AND d.batchid=1 AND (d.tier IS NULL OR d.tier NOT IN (1,2,3)))"),
+        ("Step3a  ^ list of collapse-victim customerids (up to 20)",
+         "SELECT s.customerid FROM (SELECT DISTINCT customerid FROM stg_customermgmt "
+         "  WHERE actiontype='NEW' AND tier IS NULL) s "
+         "WHERE NOT EXISTS (SELECT 1 FROM DimCustomer d WHERE d.customerid=s.customerid "
+         "  AND d.batchid=1 AND (d.tier IS NULL OR d.tier NOT IN (1,2,3))) ORDER BY 1 LIMIT 20"),
+        # Step 3(b): multi-event customers — 2+ counted events deduped to 1 alert by the
+        # QUALIFY. Each extra event = +1 expected with no matching alert (upper bound: can't
+        # see PDGF changedThisUpdate()).
+        ("Step3b multi-event customers b1 (2+ counted tier events -> deduped to 1 alert)",
+         "SELECT customerid, count(*) AS events FROM stg_customermgmt "
+         "WHERE (actiontype='NEW'     AND (tier IS NULL OR tier NOT IN (1,2,3))) "
+         "   OR (actiontype='UPDCUST' AND tier IS NOT NULL AND tier NOT IN (1,2,3)) "
+         "GROUP BY customerid HAVING count(*) > 1 ORDER BY events DESC LIMIT 20"),
+        ("Step3b  ^ total extra events = sum(events-1) over multi-event customers",
+         "SELECT coalesce(sum(events-1),0) AS extra_events FROM ("
+         "  SELECT customerid, count(*) AS events FROM stg_customermgmt "
+         "  WHERE (actiontype='NEW'     AND (tier IS NULL OR tier NOT IN (1,2,3))) "
+         "     OR (actiontype='UPDCUST' AND tier IS NOT NULL AND tier NOT IN (1,2,3)) "
+         "  GROUP BY customerid HAVING count(*) > 1)"),
+        # Step 3 first-suspect: does try_cast(actionts AS timestamp) keep sub-second precision?
+        # If precision is lost, same-day lead() ordering (which version collapses) can diverge.
+        ("Step3  stg update_ts rows with sub-second precision lost (0 = truncated to whole seconds)",
+         "SELECT count(*) FILTER (WHERE update_ts != date_trunc('second', update_ts)) AS sub_second, "
+         "count(*) FILTER (WHERE update_ts != date_trunc('day', update_ts)) AS sub_day, "
+         "count(*) AS total FROM stg_customermgmt"),
     ]
-
-    # The generator's answer key (C_TIER_INV) is computed from Batch1/Customer.txt (dense CDC),
-    # NOT from CustomerMgmt.xml. My DimCustomer is built from the sparse XML. Compare directly:
-    # a flagged customer whose Customer.txt NEW ('I') record HAS a valid tier is the extra one.
-    seed = os.environ.get("TPCDI_DIR", "").rstrip("/")
-    if seed:
-        ctxt = (f"SELECT try_cast(column2 AS bigint) AS c_id, column9 AS tier FROM "
-                f"read_csv('{seed}/Batch1/Customer.txt', delim='|', header=false, all_varchar=true, "
-                f"quote='', escape='', nullstr='', null_padding=true) WHERE column0 = 'I'")
-        flagged = ("SELECT DISTINCT customerid FROM DimCustomer WHERE batchid=1 "
-                   "AND (tier NOT IN (1,2,3) OR tier IS NULL)")
-        queries += [
-            ("Flagged batch-1 customers whose Batch1/Customer.txt NEW tier IS valid (= the extra ones)",
-             f"SELECT count(*) AS extra FROM ({flagged}) f JOIN ({ctxt}) ct ON ct.c_id=f.customerid "
-             f"WHERE ct.tier IN ('1','2','3')"),
-            ("  ^ list: customerid, Customer.txt NEW tier",
-             f"SELECT f.customerid, ct.tier AS customertxt_tier FROM ({flagged}) f "
-             f"JOIN ({ctxt}) ct ON ct.c_id=f.customerid WHERE ct.tier IN ('1','2','3') LIMIT 10"),
-        ]
 
     for label, sql in queries:
         try:
@@ -249,10 +269,6 @@ def _diagnostics(raw) -> None:
                 print(f"      {tuple(r)}")
         except Exception as e:
             print(f"  {label}: (query error: {str(e).splitlines()[0][:80]})")
-
-
-if __name__ == "__main__":
-    main()
 
 
 if __name__ == "__main__":

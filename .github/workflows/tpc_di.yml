@@ -40,9 +40,13 @@ on:
   workflow_dispatch:
     inputs:
       scale_factor:
-        description: "TPC-DI scale factor (min 3)"
-        type: string
-        default: "3"
+        # Locked to the upstream-validated scale factors (a `choice`, not free text) so no one
+        # can dispatch an arbitrary SF. sf3 excluded — see tpc_di_sequential.yml for the DIGen
+        # C_TIER_INV quirk that makes sf3 audit-unreliable.
+        description: "TPC-DI scale factor (upstream-validated values only)"
+        type: choice
+        options: ["10", "100", "1000", "5000", "10000", "20000"]
+        default: "10"
 
 permissions:
   contents: read
@@ -57,8 +61,8 @@ jobs:
   tpc-di:
     runs-on: ubuntu-latest
     env:
-      # scale_factor input wins, else the repo variable TPCDI_SF, else 20. Keys the seed cache.
-      TPCDI_SF: ${{ inputs.scale_factor || vars.TPCDI_SF || '3' }}
+      # scale_factor input wins, else the repo variable TPCDI_SF, else 10. Keys the seed cache.
+      TPCDI_SF: ${{ inputs.scale_factor || vars.TPCDI_SF || '10' }}
       TPCDI_GEN_TIMEOUT: '10800'
       TPCDI_JVM_XMX: '4g'
       # Local scratch for the per-table streamer. NB: on the hosted runner `/mnt` is NOT a separate
@@ -73,7 +77,7 @@ jobs:
       # Schema is per-scale-factor (tpcdi3, tpcdi300, …) so every SF gets its own set of Delta
       # tables under Tables/<schema>/ in the one `tpcdi` lakehouse — different SFs never clobber
       # each other. Same expression as TPCDI_SF above (sibling env keys can't reference each other).
-      DBT_SCHEMA: tpcdi${{ inputs.scale_factor || vars.TPCDI_SF || '3' }}
+      DBT_SCHEMA: tpcdi${{ inputs.scale_factor || vars.TPCDI_SF || '10' }}
       # Exported so the adapter (and stream_seed) can re-mint a OneLake token mid-build via GitHub OIDC.
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}

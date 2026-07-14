@@ -32,9 +32,17 @@ on:
   workflow_dispatch:
     inputs:
       scale_factor:
-        description: "TPC-DI scale factor (min 3)"
-        type: string
-        default: "3"
+        # Locked to the scale factors upstream (shannon-barrow/databricks-tpc-di) actually
+        # validates + ships answer keys for — a `choice` so no one can dispatch an arbitrary
+        # SF. sf3 is deliberately excluded: its generated CustomerMgmt.xml hits a DIGen
+        # changedThisUpdate() quirk (e.g. customer 2204: NEW C_TIER=2 then UPDCUST C_TIER=6)
+        # where the emitted invalid tier is real but PDGF's C_TIER_INV counter skips it,
+        # making the 'customer tier alerts' audit check off-by-one against any faithful ETL.
+        # Not reproducible at sf>=10.
+        description: "TPC-DI scale factor (upstream-validated values only)"
+        type: choice
+        options: ["10", "100", "1000", "5000", "10000", "20000"]
+        default: "10"
       rebuild:
         description: "Force a full warehouse rebuild (else reuse an already-built warehouse and only re-audit)"
         type: boolean
@@ -55,7 +63,7 @@ jobs:
   tpc-di-sequential:
     runs-on: ubuntu-latest
     env:
-      TPCDI_SF: ${{ inputs.scale_factor || vars.TPCDI_SF || '3' }}
+      TPCDI_SF: ${{ inputs.scale_factor || vars.TPCDI_SF || '10' }}
       TPCDI_GEN_TIMEOUT: '10800'
       TPCDI_JVM_XMX: '4g'
       TPCDI_STAGING: /mnt/tpcdi/staging
@@ -63,7 +71,7 @@ jobs:
       WS_ID: 1c52481c-0523-4a5a-bbde-fdc932bd77c2
       LH_NAME: tpcdi
       # Sequential warehouse schema — sibling of the single-pass tpcdi<SF>.
-      DBT_SCHEMA: tpcdi${{ inputs.scale_factor || vars.TPCDI_SF || '3' }}_seq
+      DBT_SCHEMA: tpcdi${{ inputs.scale_factor || vars.TPCDI_SF || '10' }}_seq
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_TRANSPORT_OPTION_TYPE: curl
