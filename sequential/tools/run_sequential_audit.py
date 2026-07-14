@@ -102,8 +102,46 @@ def main() -> None:
         for test, batch, result, description in failures:
             b = "" if batch is None else f" [batch {batch}]"
             print(f"    - {test}{b}: {result}  ({description})")
+        _diagnostics(raw)
         sys.exit(f"\n  AUDIT FAILED — {n_fail} check(s) not OK.")
     print("\n  AUDIT PASSED — all 130 Appendix-A checks OK.")
+
+
+def _diagnostics(raw) -> None:
+    """Print expected-vs-actual numbers for the known-tricky checks (read-only against the
+    existing Audit + DImessages, so a fast reuse run reveals them without a rebuild)."""
+    print("\n  --- diagnostics ---")
+    queries = [
+        ("Audit datasets present (need 13: Batch, Dim*, Fact*, Financial, Generator, Prospect)",
+         "SELECT dataset, count(*) AS rows FROM Audit GROUP BY dataset ORDER BY dataset"),
+        ("DOB alerts  actual (DImessages) per batch",
+         "SELECT BatchID, count(*) AS n FROM dimessages WHERE MessageType='Alert' "
+         "AND MessageText='DOB out of range' GROUP BY BatchID ORDER BY BatchID"),
+        ("DOB alerts  expected (Audit C_DOB_TO + C_DOB_TY) per batch",
+         "SELECT BatchID, sum(Value) AS n FROM Audit WHERE DataSet='DimCustomer' "
+         "AND Attribute IN ('C_DOB_TO','C_DOB_TY') GROUP BY BatchID ORDER BY BatchID"),
+        ("Tier alerts actual (DImessages) per batch",
+         "SELECT BatchID, count(*) AS n FROM dimessages WHERE MessageType='Alert' "
+         "AND MessageText='Invalid customer tier' GROUP BY BatchID ORDER BY BatchID"),
+        ("Tier alerts expected (Audit C_TIER_INV) per batch",
+         "SELECT BatchID, sum(Value) AS n FROM Audit WHERE DataSet='DimCustomer' "
+         "AND Attribute='C_TIER_INV' GROUP BY BatchID ORDER BY BatchID"),
+        ("DimCustomer batchid distribution",
+         "SELECT batchid, count(*) AS rows, count(*) FILTER (WHERE tier NOT IN (1,2,3) OR tier IS NULL) "
+         "AS bad_tier FROM DimCustomer GROUP BY batchid ORDER BY batchid"),
+    ]
+    for label, sql in queries:
+        try:
+            rows = raw.execute(sql).fetchall()
+            print(f"  {label}:")
+            for r in rows:
+                print(f"      {tuple(r)}")
+        except Exception as e:
+            print(f"  {label}: (query error: {str(e).splitlines()[0][:80]})")
+
+
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":
