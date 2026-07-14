@@ -259,6 +259,57 @@ def _diagnostics(raw) -> None:
          "SELECT count(*) FILTER (WHERE update_ts != date_trunc('second', update_ts)) AS sub_second, "
          "count(*) FILTER (WHERE update_ts != date_trunc('day', update_ts)) AS sub_day, "
          "count(*) AS total FROM stg_customermgmt"),
+        # --- DimCustomer row-count reconciliation (check #29 'Too few rows' at batch 1) ---
+        # actual batch-N versions vs the answer-key minimum C_NEW+C_INACT+C_UPDCUST-C_ID_HIST.
+        # A negative (actual-expected) says our SCD2 collapse drops more versions than C_ID_HIST.
+        ("Row count b1: actual vs expected_min (C_NEW+C_INACT+C_UPDCUST-C_ID_HIST) + components",
+         "WITH a AS (SELECT batchid, "
+         "  sum(value) FILTER (WHERE attribute='C_NEW')     AS c_new, "
+         "  sum(value) FILTER (WHERE attribute='C_INACT')   AS c_inact, "
+         "  sum(value) FILTER (WHERE attribute='C_UPDCUST') AS c_updcust, "
+         "  sum(value) FILTER (WHERE attribute='C_ID_HIST') AS c_id_hist "
+         "  FROM Audit WHERE dataset='DimCustomer' GROUP BY batchid), "
+         "act AS (SELECT batchid, count(*) AS actual FROM DimCustomer GROUP BY batchid) "
+         "SELECT a.batchid, act.actual, "
+         "  coalesce(c_new,0)+coalesce(c_inact,0)+coalesce(c_updcust,0)-coalesce(c_id_hist,0) AS expected_min, "
+         "  act.actual - (coalesce(c_new,0)+coalesce(c_inact,0)+coalesce(c_updcust,0)-coalesce(c_id_hist,0)) AS gap, "
+         "  c_new, c_inact, c_updcust, c_id_hist "
+         "FROM a JOIN act USING(batchid) ORDER BY a.batchid"),
+        # --- FactWatches reconciliation (checks #83 row count, #85 active watches) ---
+        # #83 wants (RowCount[b]-RowCount[b-1]) == WH_ACTIVE[b]; #85 wants
+        # RowCount[b]+Inactive[b] == running-sum(WH_RECORDS). LHS < RHS => watches dropped.
+        ("FactWatches DImessages actual: Row count / Inactive watches per batch",
+         "SELECT batchid, messagetext, sum(cast(messagedata AS bigint)) AS n "
+         "FROM DImessages WHERE messagesource='FactWatches' AND messagetype='Validation' "
+         "AND messagetext IN ('Row count','Inactive watches') GROUP BY batchid, messagetext "
+         "ORDER BY batchid, messagetext"),
+        ("FactWatches answer keys: WH_ACTIVE / WH_RECORDS per batch (+ running WH_RECORDS)",
+         "SELECT batchid, "
+         "  sum(value) FILTER (WHERE attribute='WH_ACTIVE')  AS wh_active, "
+         "  sum(value) FILTER (WHERE attribute='WH_RECORDS') AS wh_records, "
+         "  sum(sum(value) FILTER (WHERE attribute='WH_RECORDS')) OVER (ORDER BY batchid) AS wh_records_running "
+         "FROM Audit WHERE dataset='FactWatches' AND batchid IN (1,2,3) GROUP BY batchid ORDER BY batchid"),
+        ("FactWatches actual table: new rows / running total / rows-with-dateremoved per batch",
+         "SELECT batchid, count(*) AS rows_this_batch, "
+         "  sum(count(*)) OVER (ORDER BY batchid) AS running_total, "
+         "  count(*) FILTER (WHERE sk_dateid_dateremoved IS NOT NULL) AS removed_this_batch "
+         "FROM FactWatches GROUP BY batchid ORDER BY batchid"),
+        # --- DOB alerts = 0 in batches 2/3 (check #41) ---
+        # audit_alerts recomputes 'DOB out of range' from the final DimCustomer grouped by the
+        # version's batchid. Batch 1 matches (319) but 2/3 emit 0 vs 6 expected. Are there any
+        # batch-2/3 versions that even trip the rule, and what dobs do those versions carry?
+        ("DOB rule on batch-2/3 DimCustomer versions (too_old / too_young / null_dob)",
+         "SELECT dc.batchid, count(*) AS versions, "
+         "  count(*) FILTER (WHERE dob <= bd.batchdate - INTERVAL 100 YEAR) AS too_old, "
+         "  count(*) FILTER (WHERE dob > bd.batchdate) AS too_young, "
+         "  count(*) FILTER (WHERE dob IS NULL) AS null_dob "
+         "FROM DimCustomer dc JOIN BatchDate bd USING(batchid) "
+         "WHERE dc.batchid IN (2,3) GROUP BY dc.batchid ORDER BY dc.batchid"),
+        ("Batch-2/3 dob range vs batchdate (are extreme dobs present in these versions at all?)",
+         "SELECT dc.batchid, min(dc.dob) AS min_dob, max(dc.dob) AS max_dob, "
+         "  any_value(bd.batchdate) AS batchdate "
+         "FROM DimCustomer dc JOIN BatchDate bd USING(batchid) "
+         "WHERE dc.batchid IN (2,3) GROUP BY dc.batchid ORDER BY dc.batchid"),
     ]
 
     for label, sql in queries:
