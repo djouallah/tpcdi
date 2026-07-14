@@ -4,6 +4,9 @@
     unique_key='sk_accountid',
     merge_update_columns=['iscurrent', 'enddate'],
 ) }}
+-- depends_on: {{ ref('BatchDate') }}
+-- (BatchDate is ref'd only inside the is_incremental() branch, so dbt can't infer the
+--  dep at parse time — is_incremental() is False during parsing. This hint declares it.)
 -- DimAccount, SCD2. Sequential (3-batch) port.
 --   Historical branch (batch 1): silver/DimAccount Historical.sql
 --   Incremental branch (batches 2-3): silver/DimAccount Incremental.sql (the customer-
@@ -42,7 +45,7 @@ cust_updates as (
   join (select sk_customerid, customerid, enddate
         from {{ ref('DimCustomer') }} where not iscurrent and batchid < {{ b }}) ch
     on ci.customerid = ch.customerid and ch.enddate = ci.effectivedate
-  join {{ ref('DimAccount') }} a on ch.sk_customerid = a.sk_customerid and a.iscurrent
+  join {{ this }} a on ch.sk_customerid = a.sk_customerid and a.iscurrent
 ),
 all_updates as (
   select

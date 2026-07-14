@@ -14,7 +14,7 @@ with alltransactions as (
   group by all
 {% if var('batch') | int >= 2 %}
   union all
-  select accountid, to_date(ct_dts) as datevalue, sum(ct_amt) as account_daily_total,
+  select accountid, date(ct_dts) as datevalue, sum(ct_amt) as account_daily_total,
     {{ batchid_from_filename() }} as batchid
   from {{ read_pipe('Batch[2-' ~ var('batch') ~ ']/CashTransaction.txt',
     "{'cdc_flag': 'VARCHAR', 'cdc_dsn': 'BIGINT', 'accountid': 'BIGINT',

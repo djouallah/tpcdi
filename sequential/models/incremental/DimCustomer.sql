@@ -4,6 +4,9 @@
     unique_key='sk_customerid',
     merge_update_columns=['iscurrent', 'enddate', 'agencyid', 'creditrating', 'networth', 'marketingnameplate'],
 ) }}
+-- depends_on: {{ ref('BatchDate') }}
+-- (BatchDate is ref'd only inside the is_incremental() branch, so dbt can't infer the
+--  dep at parse time — is_incremental() is False during parsing. This hint declares it.)
 -- DimCustomer, SCD2. Sequential (3-batch) port.
 --   Historical branch (batch 1): silver/DimCustomer Historical.sql
 --   Incremental branch (batches 2-3): silver/DimCustomer Incremental.sql
