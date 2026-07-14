@@ -35,6 +35,10 @@ on:
         description: "TPC-DI scale factor (min 3)"
         type: string
         default: "3"
+      rebuild:
+        description: "Force a full warehouse rebuild (else reuse an already-built warehouse and only re-audit)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -148,8 +152,13 @@ jobs:
       # The load writes the warehouse + the full DImessages log (batch checkpoints,
       # visibility snapshots, alerts) and runs dbt test — but NOT the audit (--skip-audit),
       # so the Appendix-A audit is its own CI step below (clearer pass/fail in the UI).
-      - name: Sequential load + dbt test (full 3-batch run)
-        run: python ./sequential/scripts/run.py --skip-generate --target onelake --batches 3 --skip-audit
+      # run.py reuses an already-built warehouse by default (skips the ~15-min rebuild and
+      # only re-audits); a workflow_dispatch with rebuild=true forces a full rebuild.
+      - name: Sequential load + dbt test (reuses an existing warehouse unless rebuild=true)
+        run: |
+          EXTRA=""
+          if [ "${{ inputs.rebuild }}" = "true" ]; then EXTRA="--rebuild"; fi
+          python ./sequential/scripts/run.py --skip-generate --target onelake --batches 3 --skip-audit $EXTRA
 
       - name: Re-acquire a fresh OneLake bearer token before the audit
         run: |

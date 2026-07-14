@@ -9,6 +9,9 @@
 --   * `first(Date) -1 day` -> `first(Date) - INTERVAL 1 DAY` (1x);
 --   * `sum(MessageData)` -> `sum(cast(MessageData as bigint))` (MessageData is VARCHAR in
 --     DImessages; Spark cast it implicitly);
+--   * `COALESCE(Income, n)` -> `COALESCE(try_cast(Income as double), n)` in the Prospect
+--     MarketingNameplate check (Income is VARCHAR in this project's Prospect, as in the raw
+--     source; DuckDB won't COALESCE a VARCHAR with an integer literal — Spark auto-casts);
 --   * the CREATE...AS wrapper dropped and the trailing `;` removed so run_sequential_audit.py
 --     runs the inner SELECT and asserts every Result = 'OK'.
 -- run_sequential_audit.py fails the run on ANY row whose Result <> 'OK'. No WARN tier.
@@ -1306,7 +1309,7 @@ from (
               case
                 when (
                   COALESCE(NetWorth, 0) > 1000000
-                  or COALESCE(Income, 0) > 200000
+                  or COALESCE(try_cast(Income as double), 0) > 200000
                 )
                 and MarketingNameplate not like '%HighValue%' then 1
                 else 0
@@ -1329,7 +1332,7 @@ from (
             ) + sum(
               case
                 when (
-                  COALESCE(Income, 50000) < 50000
+                  COALESCE(try_cast(Income as double), 50000) < 50000
                   or COALESCE(CreditRating, 600) < 600
                   or COALESCE(NetWorth, 100000) < 100000
                 )
