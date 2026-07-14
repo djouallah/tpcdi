@@ -221,6 +221,26 @@ def _diagnostics(raw) -> None:
          "  WHERE dc.batchid=1 AND dc.tier IS NULL "
          "  GROUP BY dc.customerid HAVING max(s.tier) IN (1,2,3)) x"),
     ]
+
+    # The generator's answer key (C_TIER_INV) is computed from Batch1/Customer.txt (dense CDC),
+    # NOT from CustomerMgmt.xml. My DimCustomer is built from the sparse XML. Compare directly:
+    # a flagged customer whose Customer.txt NEW ('I') record HAS a valid tier is the extra one.
+    seed = os.environ.get("TPCDI_DIR", "").rstrip("/")
+    if seed:
+        ctxt = (f"SELECT try_cast(column2 AS bigint) AS c_id, column9 AS tier FROM "
+                f"read_csv('{seed}/Batch1/Customer.txt', delim='|', header=false, all_varchar=true, "
+                f"quote='', escape='', nullstr='', null_padding=true) WHERE column0 = 'I'")
+        flagged = ("SELECT DISTINCT customerid FROM DimCustomer WHERE batchid=1 "
+                   "AND (tier NOT IN (1,2,3) OR tier IS NULL)")
+        queries += [
+            ("Flagged batch-1 customers whose Batch1/Customer.txt NEW tier IS valid (= the extra ones)",
+             f"SELECT count(*) AS extra FROM ({flagged}) f JOIN ({ctxt}) ct ON ct.c_id=f.customerid "
+             f"WHERE ct.tier IN ('1','2','3')"),
+            ("  ^ list: customerid, Customer.txt NEW tier",
+             f"SELECT f.customerid, ct.tier AS customertxt_tier FROM ({flagged}) f "
+             f"JOIN ({ctxt}) ct ON ct.c_id=f.customerid WHERE ct.tier IN ('1','2','3') LIMIT 10"),
+        ]
+
     for label, sql in queries:
         try:
             rows = raw.execute(sql).fetchall()
