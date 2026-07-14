@@ -22,6 +22,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.dirname(HERE)
+# The single-pass dbt project lives in singlepass/ (sequential/ is its sibling).
+SP_PROJ = os.path.join(PROJ, "singlepass")
 
 
 def main():
@@ -66,13 +68,13 @@ def main():
 
     print(">> dbt run", flush=True)
     subprocess.run(
-        ["dbt", "run", "--project-dir", PROJ, "--profiles-dir", PROJ],
+        ["dbt", "run", "--project-dir", SP_PROJ, "--profiles-dir", SP_PROJ],
         check=True, env=env,
     )
 
     print(">> dbt test", flush=True)
     subprocess.run(
-        ["dbt", "test", "--project-dir", PROJ, "--profiles-dir", PROJ],
+        ["dbt", "test", "--project-dir", SP_PROJ, "--profiles-dir", SP_PROJ],
         check=True, env=env,
     )
     print(">> done.", flush=True)

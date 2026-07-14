@@ -68,13 +68,13 @@ jobs:
 
       - name: dbt docs generate (static — real catalog over the OneLake Delta tables)
         run: |
-          dbt deps --project-dir .
-          dbt docs generate --static --project-dir . --profiles-dir .
+          dbt deps --project-dir singlepass
+          dbt docs generate --static --project-dir singlepass --profiles-dir singlepass
 
       - name: Assemble the Pages site (static_index.html → index.html)
         run: |
           mkdir -p _site
-          cp target/static_index.html _site/index.html
+          cp singlepass/target/static_index.html _site/index.html
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
