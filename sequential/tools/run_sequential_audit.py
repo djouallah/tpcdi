@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 
 import duckrun
 
@@ -68,10 +69,24 @@ def main() -> None:
     print(f"\n  warehouse: {args.warehouse} (schema {args.schema})")
     print(f"  audit:     {AUDIT_SQL}\n")
 
-    try:
-        rows = raw.execute(sql).fetchall()
-    except Exception as e:
-        sys.exit(f"ERROR: audit query failed to execute: {e}")
+    # Retry the whole audit on a transient OneLake/object-store error (the big query scans
+    # every Delta table's log; a network blip mid-scan otherwise fails the step outright).
+    rows = None
+    for attempt in range(1, 4):
+        try:
+            rows = raw.execute(sql).fetchall()
+            break
+        except Exception as e:
+            msg = str(e).splitlines()[0]
+            transient = any(s in str(e) for s in (
+                "ObjectStoreError", "error sending request", "HTTP error",
+                "timed out", "connection", "Connection", "reset"))
+            if transient and attempt < 3:
+                print(f"  (attempt {attempt} hit a transient store error, retrying: {msg[:90]})",
+                      flush=True)
+                time.sleep(10)
+                continue
+            sys.exit(f"ERROR: audit query failed to execute: {e}")
 
     # The classic audit returns (Test, Batch, Result, Description). A check passes iff its
     # Result is exactly 'OK'; anything else (the check's else-branch message) is a failure.
@@ -129,6 +144,25 @@ def _diagnostics(raw) -> None:
         ("DimCustomer batchid distribution",
          "SELECT batchid, count(*) AS rows, count(*) FILTER (WHERE tier NOT IN (1,2,3) OR tier IS NULL) "
          "AS bad_tier FROM DimCustomer GROUP BY batchid ORDER BY batchid"),
+        # DOB alerts recomputed straight from DimCustomer (what audit_alerts SHOULD emit),
+        # split into too-old vs too-young, so the 37-vs-8 gap is attributable.
+        ("DOB recompute from DimCustomer (distinct customer per batch): too_old / too_young",
+         "SELECT batchid, "
+         "count(*) FILTER (WHERE datediff('year', dob, batchdate) >= 100) AS too_old, "
+         "count(*) FILTER (WHERE dob > batchdate) AS too_young "
+         "FROM (SELECT DISTINCT dc.customerid, dc.dob, bd.batchdate, dc.batchid "
+         "      FROM DimCustomer dc JOIN BatchDate bd USING (batchid)) x GROUP BY batchid ORDER BY batchid"),
+        ("DOB flagged samples (batch 1): customerid, dob, batchdate, yrs",
+         "SELECT DISTINCT dc.customerid, dc.dob, bd.batchdate, datediff('year', dob, batchdate) AS yrs "
+         "FROM DimCustomer dc JOIN BatchDate bd USING (batchid) "
+         "WHERE dc.batchid = 1 AND (datediff('year', dob, batchdate) >= 100 OR dob > batchdate) "
+         "ORDER BY yrs LIMIT 15"),
+        ("Tier recompute from DimCustomer batch 1 (latest per customer): null vs out-of-range",
+         "SELECT count(*) FILTER (WHERE tier IS NULL) AS null_tier, "
+         "count(*) FILTER (WHERE tier IS NOT NULL AND tier NOT IN (1,2,3)) AS oor_tier "
+         "FROM (SELECT customerid, tier FROM DimCustomer WHERE batchid = 1 "
+         "      QUALIFY row_number() OVER (PARTITION BY customerid, batchid ORDER BY enddate DESC) = 1) x "
+         "WHERE tier IS NULL OR tier NOT IN (1,2,3)"),
     ]
     for label, sql in queries:
         try:

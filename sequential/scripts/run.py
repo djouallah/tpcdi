@@ -95,7 +95,10 @@ SELECT
   try_cast(column4 AS BIGINT)  AS value,
   try_cast(column5 AS DOUBLE)  AS dvalue
 FROM {read}
-WHERE try_cast(column1 AS INTEGER) IS NOT NULL
+-- Drop ONLY the header row (DataSet,BatchID,...); keep every real answer-key row including
+-- the batch-less 'Generator' / 'Batch' meta rows (which have an empty BatchID) — the
+-- 'Audit table sources' check needs all 13 DataSets present, not just the per-batch ones.
+WHERE lower(trim(column0)) NOT IN ('dataset', '')
 """
 
 
@@ -231,6 +234,15 @@ def main() -> None:
     conn = connect(warehouse, args.schema)
     conn.con.execute("SET TimeZone='UTC'")
 
+    # The Audit answer-key table is static CSV data, independent of the warehouse build, so
+    # (re)build it ALWAYS — even on reuse — so an audit_ddl / answer-key fix takes effect
+    # without a full rebuild.
+    print(">> Audit answer keys", flush=True)
+    conn.sql(audit_ddl(staging))
+    conn.refresh()
+    n_audit = conn.sql("SELECT count(*) AS n FROM Audit").fetchone()[0]
+    print(f"   Audit rows: {n_audit:,}", flush=True)
+
     # Reuse gate (on by default): if a prior full 3-batch load already finished, skip the
     # whole build (data load + DImessages + dbt test) and go straight to the audit against
     # the existing warehouse — re-running then just re-audits, no ~15-min rebuild. Pass
@@ -243,15 +255,13 @@ def main() -> None:
     if reuse:
         full_run = True
         print(">> warehouse already built (batch-3 PCR in DImessages) — reusing it; "
-              "skipping data load + dbt test. Pass --rebuild to force a full rebuild.",
+              "skipping data load + DImessages + dbt test. Pass --rebuild to force.",
               flush=True)
     else:
-        print(">> init: Audit + DImessages", flush=True)
-        conn.sql(audit_ddl(staging))
+        print(">> init: DImessages", flush=True)
         conn.sql(DIMESSAGES_DDL)
         conn.refresh()
-        n_audit = conn.sql("SELECT count(*) AS n FROM Audit").fetchone()[0]
-        print(f"   Audit rows: {n_audit:,}; DImessages created empty", flush=True)
+        print("   DImessages created empty", flush=True)
         if args.init_only:
             print(">> init-only done.", flush=True)
             return
