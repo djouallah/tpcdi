@@ -15,128 +15,168 @@ output that runs identically local ↔ Fabric.
 
 ![The built TPC-DI warehouse in the Fabric OneLake explorer — the `tpcdi` lakehouse with a per-scale-factor schema (`tpcdi100`) holding every dimension and fact as a Delta table.](onelake.png)
 
+## Two modes, two self-contained projects
+
+The repo holds **two independent dbt projects**, each a complete, self-contained way to run
+the benchmark. They share only the raw OneLake seed and write **different schemas**, so they
+never collide and never wait on each other:
+
+| Folder | Mode | How it loads | Validation |
+|---|---|---|---|
+| [`singlepass/`](singlepass/) | **Single-pass** | one `dbt run` folds Batch1 historical + Batch2/3 CDC into the final SCD2 warehouse | `dbt test` (per-model uniqueness / FK / SCD2 grain / enum domains) |
+| [`sequential/`](sequential/) | **Sequential (3-batch)** | the spec's real model: historical load (Batch1) → two incremental CDC batches, with a per-batch `DImessages` checkpoint between each | `dbt test` **plus the COMPLETE Appendix-A audit** (130 checks, no WARN tier) |
+
+Both produce the same star schema; the sequential mode additionally reproduces the spec's
+between-batch checkpoints, which is what lets it run the full `automated_audit.sql` (the
+DImessages-driven per-batch checks a single-pass load can't produce). Each folder has its own
+`dbt_project.yml`, `profiles.yml`, `packages.yml`, `macros/`, `models/`, and `scripts/` —
+nothing dbt-level is shared. The single-pass warehouse lands in `Tables/tpcdi<N>`, the
+sequential one in `Tables/tpcdi<N>_seq`.
+
 ## Setup
 
-The CI (`.github/workflows/tpc_di.yml`) runs the whole benchmark on **Microsoft Fabric
-OneLake**. To run it in your own fork you need:
+Each mode has its own CI workflow — [`tpc_di.yml`](.github/workflows/tpc_di.yml) (single-pass)
+and [`tpc_di_sequential.yml`](.github/workflows/tpc_di_sequential.yml) (sequential) — both
+running on **Microsoft Fabric OneLake**. To run them in your own fork you need:
 
 - Two **repo secrets** — `AZURE_CLIENT_ID` and `AZURE_TENANT_ID` — for a Fabric service
   principal / app registration with a **federated credential** trusting this repo (OIDC; no
   client secret is stored). The principal needs contributor rights on the target workspace.
-- The target **workspace GUID** is set as `WS_ID` in the workflow env (edit it to yours). The
-  workflow creates a schema-enabled lakehouse named **`tpcdi`** in that workspace if it doesn't
-  exist, and writes both the seed (`Files/tpcdi/sf<N>`) and the warehouse (`Tables/tpcdi<N>`, one
-  schema per scale factor) there.
-- Optionally a repo **variable** `TPCDI_SF` to set the default scale factor (else `20`);
+- The target **workspace GUID** is set as `WS_ID` in each workflow env (edit it to yours). The
+  workflows create a schema-enabled lakehouse named **`tpcdi`** in that workspace if it doesn't
+  exist, and write both the seed (`Files/tpcdi/sf<N>`) and the warehouse (`Tables/tpcdi<N>` /
+  `Tables/tpcdi<N>_seq`) there.
+- Optionally a repo **variable** `TPCDI_SF` to set the default scale factor (else `3`);
   `workflow_dispatch` takes a `scale_factor` input.
 
 No secret ever pins a token — a fresh OneLake storage token is minted from the OIDC login as
 needed (including mid-build, so multi-hour large-SF runs survive the ~1h token lifetime).
 
+The two workflows are **fully independent**: each creates/resolves the lakehouse and streams
+its own seed idempotently (a fast cache-hit when the other already produced it), and each fires
+only on changes to its own folder — so a single-pass edit never reruns the sequential load and
+vice-versa. `requirements.txt` (the shared Python env) triggers both.
+
 ## What it builds
 
-A single `dbt run` performs the whole load in one pass (Batch1 historical +
-Batch2/3 incremental CDC together), producing the dimensional warehouse:
+Both modes produce the same dimensional warehouse:
 
 - **Dimensions:** `DimDate`, `DimTime`, `DimBroker`, `DimCompany`*, `DimSecurity`*,
   `DimCustomer`*, `DimAccount`*, `DimTrade`  (`*` = SCD Type 2)
 - **Facts:** `FactCashBalances`, `FactHoldings`, `FactWatches`, `FactMarketHistory`
 - **Reference / other:** `Industry`, `StatusType`, `TaxRate`, `TradeType`,
-  `Financial`, `Prospect`, plus staging (`FinWire`, `ProspectIncremental`,
-  `stg_customermgmt`, `BatchDate`)
+  `Financial`, `Prospect`, plus staging (`FinWire`, `stg_customermgmt`, `BatchDate`)
+
+The sequential mode also maintains a `DImessages` validation log and an `Audit` answer-key
+table (from the PDGF `*_audit.csv` files) that its full audit reads.
 
 ## Layout
 
 ```
-models/base/        typed reads of the reference/date files + FinWire split + Prospect
-models/silver/      FINWIRE-derived SCD2 dims (DimCompany, DimSecurity) + Financial + DimBroker
-models/staging/     stg_customermgmt — CustomerMgmt.xml flattened via the `webbed` extension
-models/incremental/ SCD2 DimCustomer/DimAccount/DimTrade, Prospect, and the four facts
-macros/tpcdi.sql    shared read_pipe / read_csvfile / read_fixed helpers + xml/sk/status macros
-scripts/            stream_seed.py (per-table generate→mint→copy→delete to OneLake — the CI path),
-                    generate_data.py (drives PDGF + splits CustomerMgmt.xml), upload_to_onelake.py,
-                    run_benchmark.py (local driver)
-models/**/_*.yml    dbt-native tests: PK uniqueness, FK relationships, SCD2 grain, enum domains (dbt test)
-packages.yml        dbt_utils (unique_combination_of_columns for the SCD2 grain checks)
-queries/            plain analytical SELECTs run against the built warehouse (see below)
-scripts/run_queries.py  read-only duckrun runner for queries/ (local or OneLake)
-tools/              check_catalog_stats.py — asserts the docs catalog carries real Delta stats
+singlepass/     single-pass dbt project (one dbt run; dbt test)
+sequential/     sequential 3-batch dbt project (batches + DImessages + full Appendix-A audit)
+.github/        two independent ETL workflows (tpc_di.yml, tpc_di_sequential.yml) + queries/docs
+requirements.txt  the one shared Python env (duckrun + obstore) for both workflows
+README · LICENSE · onelake.png
 ```
+
+Inside each project folder (both the same shape):
+
+```
+dbt_project.yml / profiles.yml / packages.yml
+macros/tpcdi.sql    shared read_pipe / read_csvfile / read_fixed helpers + xml/sk/status macros
+models/             the dbt models (see each folder)
+scripts/            generate_data.py + stream_seed.py + seed_manifest.py (per-table generate→
+                    mint→copy→delete to OneLake), and the mode's runner (run_benchmark.py /
+                    run.py)
+```
+
+Sequential adds `sequential/sql/` (the between-batch `batch_initial` / `batch_complete` /
+`batch_validation` / `visibility_1` / `visibility_2` / `audit_alerts` inserts, plus the ported
+`automated_audit.sql`) and `sequential/tools/run_sequential_audit.py`. Single-pass keeps
+`singlepass/queries/` + `singlepass/scripts/run_queries.py` (see below) and
+`singlepass/tools/check_catalog_stats.py`.
 
 ## Querying the warehouse
 
-TPC-DI is an ETL benchmark — it defines no query workload. `queries/` adds a small set of
-plain analytical `SELECT`s over the finished star schema (portfolio value by tier, commission
-by broker/quarter, market-close trends, watch-list activity, financials by industry, …), so
-you can exercise the *data* and not just the load.
+TPC-DI is an ETL benchmark — it defines no query workload. `singlepass/queries/` adds a small
+set of plain analytical `SELECT`s over the finished star schema (portfolio value by tier,
+commission by broker/quarter, market-close trends, watch-list activity, financials by industry,
+…), so you can exercise the *data* and not just the load.
 
-`scripts/run_queries.py` runs every `queries/*.sql` through `duckrun.connect(..., read_only=True)`
-and prints row counts, timings and a small preview. Because the connection is **read-only** it
-cannot touch the warehouse, so it is completely independent of the ETL phase.
+`singlepass/scripts/run_queries.py` runs every `singlepass/queries/*.sql` through
+`duckrun.connect(..., read_only=True)` and prints row counts, timings and a small preview.
+Because the connection is **read-only** it cannot touch the warehouse, so it is completely
+independent of the ETL phase.
 
 ```bash
 # local, against a warehouse built by run_benchmark.py
-WAREHOUSE_PATH=./warehouse python scripts/run_queries.py
+WAREHOUSE_PATH=./warehouse python singlepass/scripts/run_queries.py
 
 # OneLake
 WAREHOUSE_PATH=abfss://<ws>@onelake.dfs.fabric.microsoft.com/<lh>/Tables \
-    ONELAKE_TOKEN=... python scripts/run_queries.py
+    ONELAKE_TOKEN=... python singlepass/scripts/run_queries.py
 ```
 
 A **separate** CI workflow (`.github/workflows/queries.yml`) runs these against the live OneLake
-`tpcdi` warehouse on demand (`workflow_dispatch`) or when `queries/**` changes. It has its own
-concurrency group (not the ETL group), does no generation / `dbt run` / write, and only reads —
-so it never interferes with the load pipeline.
+`tpcdi` warehouse on demand (`workflow_dispatch`) or when `singlepass/queries/**` changes. It has
+its own concurrency group (not the ETL group), does no generation / `dbt run` / write, and only
+reads — so it never interferes with the load pipeline.
 
 ## Running it
 
-Requires a JDK (for PDGF) and network access (to fetch the datagen toolkit and
-install the `webbed` DuckDB community extension). One command does generate →
-dbt run → test:
+Requires a JDK (for PDGF) and network access (to fetch the datagen toolkit and install the
+`webbed` DuckDB community extension).
+
+**Single-pass** — one command does generate → dbt run → test:
 
 ```bash
-python scripts/run_benchmark.py --sf 3           # local ./warehouse
-```
-
-OneLake (Delta output to a Fabric Lakehouse):
-
-```bash
+python singlepass/scripts/run_benchmark.py --sf 3           # local ./warehouse
+# OneLake:
 WAREHOUSE_PATH=abfss://<ws>@onelake.dfs.fabric.microsoft.com/<lh>/Tables \
 ONELAKE_TOKEN=<bearer> \
-python scripts/run_benchmark.py --sf 3 --target onelake
+python singlepass/scripts/run_benchmark.py --sf 3 --target onelake
 ```
 
-CI (`.github/workflows/tpc_di.yml`) runs the whole thing **on OneLake**, on every push:
+**Sequential** — runs the three batches in order, writes the DImessages checkpoints, then the
+full audit (`--batches N` runs only batches 1..N; the audit needs the full 3):
+
+```bash
+WAREHOUSE_PATH=./warehouse DBT_SCHEMA=tpcdi3_seq \
+python sequential/scripts/run.py --sf 3                     # local
+# OneLake:
+WAREHOUSE_PATH=abfss://<ws>@onelake.dfs.fabric.microsoft.com/<lh>/Tables \
+TPCDI_DIR=abfss://<ws>@onelake.dfs.fabric.microsoft.com/<lh>/Files/tpcdi/sf3 \
+ONELAKE_TOKEN=<bearer> DBT_SCHEMA=tpcdi3_seq \
+python sequential/scripts/run.py --sf 3 --target onelake --batches 3
+```
+
+Both CI workflows run their mode **on OneLake**, on every push that touches that mode's folder:
 
 1. Create the dedicated **`tpcdi` lakehouse** if it doesn't exist (Fabric REST, schema-enabled).
 2. `stream_seed.py` generates the seed **one PDGF table at a time** and streams each straight to
    OneLake — for each table: `-start <table>` → local `/mnt` → (split `CustomerMgmt.xml` into
    chunks) → **mint a fresh token → obstore multipart upload to `Files/tpcdi/sf<N>` → write a
    per-table manifest → delete local → next**. The generator's `*_audit.csv` answer-key files ride
-   along in the same batch dirs (the uploader copies the whole tree). Local disk therefore only ever
-   holds a single table, so any scale factor fits the runner; PDGF is seed-deterministic, so the
-   per-table output is byte-identical to a full run.
-   **Resumable:** it first lists what is already in `Files/tpcdi/sf<N>` and skips every table whose
-   files are present at their recorded byte size (per-table manifests under `_manifest/`), so a
-   re-run after a partial failure regenerates only the missing tables, and a full cache hit does no
-   generation (no datagen clone) at all.
-4. A fresh OneLake token is minted, then `dbt run` reads the seed **from OneLake Files**
-   (globs work over `abfss://`) and writes the Delta dimension/fact tables to **`Tables/tpcdi<sf>`**
-   (one schema per scale factor) — the runner never hosts the data. A large SF can outlast the ~1h
-   token, so dbt re-mints and `dbt retry` (resumes from the failed model) on failure, on top of the
-   adapter's own mid-run GitHub-OIDC token refresh.
-5. `dbt test` validates the built warehouse over `abfss://` — per-model uniqueness, referential
-   integrity, SCD2 grain, and enum domains (see below).
-6. `tools/run_audit.py` runs the **end-state audit** — the single-pass-valid subset of the TPC-DI
-   Appendix-A checks — against the finished warehouse plus the PDGF `*_audit.csv` answer keys
-   (see [End-state audit](#end-state-audit)). It is **blocking**: any FAIL fails the job.
+   along in the same batch dirs. Local disk therefore only ever holds a single table, so any scale
+   factor fits the runner; PDGF is seed-deterministic, so the per-table output is byte-identical to
+   a full run. **Resumable:** it lists what is already in `Files/tpcdi/sf<N>` and skips every table
+   whose files are present at their recorded byte size (per-table manifests under `_manifest/`), so
+   a re-run regenerates only the missing tables, and a full cache hit does no generation at all.
+3. A fresh OneLake token is minted, then the mode's driver reads the seed **from OneLake Files**
+   (globs work over `abfss://`) and writes the Delta tables to **`Tables/tpcdi<sf>`** (single-pass)
+   or **`Tables/tpcdi<sf>_seq`** (sequential) — the runner never hosts the data. A large SF can
+   outlast the ~1h token, so the adapter re-mints mid-run via GitHub OIDC.
+4. `dbt test` validates the built warehouse over `abfss://` — per-model uniqueness, referential
+   integrity, SCD2 grain, and enum domains.
+5. **Sequential only:** `tools/run_sequential_audit.py` runs the full Appendix-A audit against the
+   finished warehouse + DImessages (see [Sequential audit](#sequential-audit)). **Blocking:** any
+   non-OK check fails the job.
 
 The scale factor is `${{ inputs.scale_factor }}` (workflow_dispatch) → repo variable `TPCDI_SF`
-→ `20` (the default). It scales to `100` (~10GB seed / ~163M source rows / ~108M warehouse rows)
-and beyond (the TPC-DI spec minimum is `3`). Changing it uses a fresh `sf<N>` seed cache, so
-it regenerates once for that SF. Large factors need headroom, so the seed is staged on `/mnt`
-(the runner's ~65GB disk), the generation watchdog is 3h (`TPCDI_GEN_TIMEOUT`), and the PDGF
-heap is `TPCDI_JVM_XMX` (4g in CI).
+→ `3` (the default; also the TPC-DI spec minimum). Changing it uses a fresh `sf<N>` seed cache,
+so it regenerates once for that SF. Large factors need headroom, so the seed is staged on `/mnt`,
+the generation watchdog is 3h (`TPCDI_GEN_TIMEOUT`), and the PDGF heap is `TPCDI_JVM_XMX` (4g in CI).
 
 ## Notes & design choices
 
@@ -165,13 +205,11 @@ heap is `TPCDI_JVM_XMX` (4g in CI).
 - **Seed is generated once, then cached in OneLake — resumably, per table.** `stream_seed.py`
   lists `Files/tpcdi/sf<N>` and, for each of the 16 PDGF tables, skips generation when every file
   that table produced is already present at its recorded byte size — tracked by a small per-table
-  manifest at `Files/tpcdi/sf<N>/_manifest/<table>.json` (`seed_manifest.py`). A partial run (e.g.
-  killed at a large SF) therefore resumes and regenerates only the missing tables rather than
-  starting over, and a complete seed is a fast no-op (no datagen clone). "Present" means
+  manifest at `Files/tpcdi/sf<N>/_manifest/<table>.json` (`seed_manifest.py`). "Present" means
   present-and-same-size (obstore listing), which catches truncated/half-uploaded files — PDGF is
-  deterministic, so an identical size is a strong correctness signal. Uploads use obstore multipart
-  (`stream_seed._upload`), and dbt reads the seed straight from OneLake — the runner only hosts each
-  table's bytes transiently, during its generation.
+  deterministic, so an identical size is a strong correctness signal. Both modes stream to the same
+  `Files/tpcdi/sf<N>` prefix, so whichever runs first pays the generation cost and the other gets a
+  fast cache hit.
 - **XML — and why we chunk it.** DuckDB has no first-party XML reader, so
   `stg_customermgmt` uses the [`webbed`](https://github.com/teaguesterling/duckdb_webbed)
   community extension (`INSTALL webbed FROM community; LOAD webbed`, via the model's
@@ -181,64 +219,57 @@ heap is `TPCDI_JVM_XMX` (4g in CI).
   which is how an sf100 run first looked "green" while the customer/account/trade/fact
   tables came out near-empty). So `generate_data.py` splits it into `CustomerMgmt_NNNN.xml`
   chunks (~20k `<Action>` elements each), which the model reads with the
-  `CustomerMgmt_*.xml` glob (per-file parse, bounded memory) — without the split the tables came
-  out near-empty while the run still looked green.
+  `CustomerMgmt_*.xml` glob (per-file parse, bounded memory).
 - **Headerless typed files.** duckrun keeps source scans to auto-detect, so the
   models read the raw files directly with an explicit `read_csv(columns=…)`
   (`macros/tpcdi.sql`) rather than declaring dbt sources.
 - **SCD2.** Company/Security/Customer/Account versioning is done with the reference
   project's window-function SQL (effective/end dating driven by batch dates and CDC
   actions), not dbt snapshots — dbt's hash-based snapshot semantics don't match
-  TPC-DI's dating rules.
-- **CDC is fully processed — the load is single-*pass*, not single-*batch*.** The
-  incremental models read `Batch[123]/…` (all three batches: Batch1 historical +
-  Batch2/3 CDC inserts/updates), apply the `cdc_flag`, and fold everything into the
-  final SCD2 dimensions and facts in one `dbt run`. What we *don't* do is run the three
-  batches as three separate, sequentially-audited executions — we compute the final
-  end-state directly. The finished warehouse is the same; only the between-batch
-  checkpoints are absent.
-- **dbt-native tests — the per-model transformation gate.** A `dbt test` step (CI, after the
-  build + docs) runs standard generic tests defined in `models/**/_*.yml` over the built OneLake
-  Delta tables: surrogate-key uniqueness + `not_null`, foreign-key `relationships` to the parent
+  TPC-DI's dating rules. The sequential mode expresses the incremental SCD2 update as a
+  single duckrun `merge` (new + close-current + prospect-update rows unioned, disjoint by
+  surrogate key), since a native two-`WHEN MATCHED` MERGE isn't expressible in one dbt merge.
+- **Single-*pass* vs single-*batch*.** The single-pass mode reads `Batch[123]/…` (all three
+  batches: Batch1 historical + Batch2/3 CDC inserts/updates), applies the `cdc_flag`, and folds
+  everything into the final SCD2 dimensions and facts in one `dbt run` — the finished warehouse is
+  correct, but there are no between-batch checkpoints. The **sequential** mode runs the three
+  batches as three separate, sequentially-validated executions (`is_incremental()` branching:
+  batch 1 = the historical `--full-refresh` load, batches 2–3 = CDC merges), writing the
+  `DImessages` validation log between each — which is what the full Appendix-A audit needs.
+- **dbt-native tests — the per-model transformation gate.** A `dbt test` step (both modes, after
+  the build) runs standard generic tests defined in `models/**/_*.yml` over the built OneLake Delta
+  tables: surrogate-key uniqueness + `not_null`, foreign-key `relationships` to the parent
   dimension, `dbt_utils.unique_combination_of_columns` for the SCD2 grain (business key +
   `effectivedate`), and `accepted_values` enum domains (Status, Gender, Issue, ExchangeID) — a
-  NULL/duplicate SK or an orphan FK fails the exact model. Read-only over `delta_scan` views;
-  needs only the OneLake bearer token.
+  NULL/duplicate SK or an orphan FK fails the exact model. Read-only over `delta_scan` views.
 
-### End-state audit
+### Sequential audit
 
-`tools/run_audit.py` restores the **end-state subset** of the TPC-DI Appendix-A *automated audit*
-(ported from `shannon-barrow/databricks-tpc-di`
-`src/incremental_batches/audit_validation/automated_audit.sql`). It loads every PDGF `*_audit.csv`
-answer-key file (which rides along in the seed under `Batch{1,2,3}/`) into an `Audit` table, then
-validates the finished warehouse against it. Read-only, via the same duckrun connection as
-`scripts/run_queries.py`; the answer keys go into a DuckDB TEMP table so nothing touches Delta.
+`sequential/tools/run_sequential_audit.py` runs the **complete** TPC-DI Appendix-A *automated
+audit* — all 130 checks, ported verbatim to DuckDB in `sequential/sql/automated_audit.sql` from
+`shannon-barrow/databricks-tpc-di`
+`src/incremental_batches/audit_validation/automated_audit.sql`. There is **no reduced subset and
+no WARN tier**: every check is FAIL-fatal, and the run exits nonzero if any check's `Result` is
+not `OK`. It runs read-only (same duckrun connection style as the query runner) as the last step
+of a full 3-batch run.
 
-Each check prints `PASS/FAIL/WARN | test | batch | expected | actual`. It runs in CI right after
-`dbt test` and is **blocking** — any FAIL exits nonzero and fails the job.
+The audit reads three things, all already materialized as Delta tables in the schema:
 
-- **Kept:** every check that reads only the finished warehouse tables and/or the `Audit` answer
-  keys — final/per-batch row counts vs the audit values, attribute-domain checks (gender,
-  marketingnameplate, S&P rating, exchange/issue/status enums), SCD2 date sanity (EndDate
-  alignment, no overlap, end-of-time, IsCurrent), referential integrity, and the FactMarketHistory
-  52-week `52-week-low ≤ day-low ≤ close ≤ day-high ≤ 52-week-high` spot check.
-- **`WARN` (kept, non-fatal):** checks whose correctness depends on per-batch *source*
-  attribution or the Audit `Batch` FirstDay/LastDay date windows — both ambiguous under a
-  single-pass load, where a row's `batchid` is the batch that sourced it, not a load checkpoint.
-- **Skipped:** every check that reads the `DImessages` validation log or the Audit meta-rows —
-  per-batch validation-report counts, phase-complete (PCR) records, `Audit table batches/sources`
-  meta-checks, and the Batch / Data-visibility row-count regressions. A single-pass load produces
-  no `DImessages` log and no between-batch checkpoints, so these have nothing to compare against
-  (see below). The full list is documented at the top of `tools/run_audit.py`.
+- the finished **warehouse** dimension/fact tables;
+- the **`Audit`** answer-key table — the PDGF `*_audit.csv` files (which ride along in the seed
+  under `Batch{1,2,3}/`), loaded by the orchestrator;
+- the **`DImessages`** log the orchestrator writes between batches, which the incremental checks
+  read: `batch_initial.sql` (the batch-0 empty-DW checkpoint), `batch_complete.sql` (the
+  per-batch Phase Complete Record), `batch_validation.sql` (24 row-count / referential-integrity
+  Validation rows per batch), `visibility_1.sql` / `visibility_2.sql` (the two Data Visibility
+  snapshots), and `audit_alerts.sql` (the tier / DOB / commission / fee / SPRating Alert rows).
 
-## Not yet covered (follow-ups)
-
-- **Per-batch Appendix-A audit + DImessages.** The parts of the spec's *automated audit* that
-  read the `DImessages` validation log are inherently per-batch (row counts / phase-complete
-  records after each of the 3 batches) and assume the 3-separate-runs execution model. Our
-  single-pass load has no between-batch checkpoints or `DImessages` log, so those checks are
-  skipped by `tools/run_audit.py` (the end-state subset above covers everything that *can* be
-  validated on the finished warehouse); the full per-batch audit is a separate, larger build.
+This covers everything the single-pass load *couldn't* — the DImessages validation-report and
+phase-complete counts, the per-batch row-count reconciliations against the answer keys, the
+alert-count checks, and the Batch / Data-visibility row-count regressions — plus all the
+end-state structural invariants (SCD2 date sanity, referential integrity, attribute domains, and
+the FactMarketHistory `52-week-low ≤ day-low ≤ close ≤ day-high ≤ 52-week-high` check). Each
+check prints `PASS/FAIL | test | batch | detail`.
 
 ## License
 
