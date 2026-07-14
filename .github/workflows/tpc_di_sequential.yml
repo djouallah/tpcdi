@@ -16,20 +16,19 @@ on:
   push:
     branches: ["**"]
     # Only sequential-mode changes (and this workflow / shared requirements) trigger it —
-    # a single-pass-only change must not rerun the sequential load.
+    # a single-pass-only change must not rerun the sequential load. (GitHub forbids pairing
+    # paths with paths-ignore on one event, so docs are excluded via a negated pattern.)
     paths:
       - "sequential/**"
+      - "!sequential/**/*.md"
       - "requirements.txt"
       - ".github/workflows/tpc_di_sequential.yml"
-    paths-ignore:
-      - "**/*.md"
   pull_request:
     paths:
       - "sequential/**"
+      - "!sequential/**/*.md"
       - "requirements.txt"
       - ".github/workflows/tpc_di_sequential.yml"
-    paths-ignore:
-      - "**/*.md"
   workflow_dispatch:
     inputs:
       scale_factor:
