@@ -5,11 +5,11 @@ name: tpc-di-sequential
 # written to DImessages, and the COMPLETE Appendix-A audit at the end. Runs the sequential/
 # dbt project into a SEPARATE schema (tpcdi<N>_seq) in the same `tpcdi` lakehouse.
 #
-# This workflow is FULLY INDEPENDENT of the single-pass workflow (tpc_di.yml): it creates /
-# resolves the lakehouse and streams its OWN seed (idempotent — a fast cache-hit when the
-# single-pass run already produced it), so it never waits on the single-pass warehouse
-# build. The only shared asset is the raw OneLake seed (Files/tpcdi/sf<N>); the two modes
-# write different schemas and never collide.
+# This workflow writes its OWN schema (tpcdi<N>_seq) and streams its OWN seed, but it SHARES
+# the single-pass workflow's concurrency group (tpcdi-onelake) so the two can never run at
+# once: the raw OneLake seed (Files/tpcdi/sf<N>) is the shared asset, and running both in
+# parallel would regenerate + race on it. Serialized, whichever runs second finds the seed
+# already present (seed_manifest cache-hit) and skips straight to its warehouse build + audit.
 #
 # Requires the same two repo secrets as tpc_di.yml (AZURE_CLIENT_ID, AZURE_TENANT_ID).
 on:
@@ -52,11 +52,13 @@ permissions:
   contents: read
   id-token: write
 
-# One sequential run at a time — every run writes the same tpcdi<N>_seq schema. A separate
-# group from the single-pass workflow, so the two modes run independently (they touch
-# disjoint schemas; the only shared asset, the seed, is written idempotently).
+# SHARES the single-pass workflow's concurrency group (tpcdi-onelake) so the two modes can
+# NEVER run at the same time. They stream the same raw seed (Files/tpcdi/sf<N>); running in
+# parallel would regenerate it twice (and race on the same OneLake paths). Serialized, whoever
+# runs second gets a full seed cache-hit (seed_manifest skip) and only does its own warehouse
+# build + audit. cancel-in-progress: false => the second queues and waits, never cancels.
 concurrency:
-  group: tpcdi-onelake-seq
+  group: tpcdi-onelake
   cancel-in-progress: false
 
 jobs:
