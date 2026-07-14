@@ -9,16 +9,18 @@
 -- MessageData is VARCHAR in DImessages so counts are cast; UNION -> UNION ALL (every
 -- (source,text) pair is unique). now() is constant within the statement, so all rows of
 -- one snapshot share a MessageDateAndTime (required by the joined-vs-unjoined check).
+-- The classic sets BatchID = max(BatchID) from DImessages; we take it as a {{batch_id}}
+-- parameter from the orchestrator (== that max) instead, because duckrun only routes an
+-- INSERT to a Delta append when its SELECT does NOT also scan the target table.
 INSERT INTO DImessages
 SELECT
   now()::timestamp AS MessageDateAndTime,
-  coalesce(BatchID, 0) AS BatchID,
+  {{batch_id}} AS BatchID,
   MessageSource,
   MessageText,
   'Visibility_1' AS MessageType,
   MessageData
-FROM (SELECT max(BatchID) AS BatchID FROM DImessages) x
-JOIN (
+FROM (
   SELECT 'DimAccount'        AS MessageSource, 'Row count' AS MessageText, cast(count(*) AS varchar) AS MessageData FROM DimAccount
   UNION ALL SELECT 'DimBroker',   'Row count', cast(count(*) AS varchar) FROM DimBroker
   UNION ALL SELECT 'DimCompany',  'Row count', cast(count(*) AS varchar) FROM DimCompany
@@ -62,4 +64,4 @@ JOIN (
     JOIN DimCustomer c  ON f.SK_CustomerID = c.SK_CustomerID
     JOIN DimDate     dp ON f.SK_DateID_DatePlaced = dp.SK_DateID
     JOIN DimSecurity s  ON f.SK_SecurityID = s.SK_SecurityID
-) y ON 1 = 1;
+) y;

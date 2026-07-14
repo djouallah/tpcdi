@@ -241,7 +241,7 @@ def main() -> None:
         # Data Visibility snapshot #1 after the historical load; #2 runs at end-of-run. The
         # audit asserts row counts are non-decreasing from snapshot 1 to snapshot 2.
         if batch == 1:
-            run_sql_file(conn, "visibility_1.sql", {})
+            run_sql_file(conn, "visibility_1.sql", {"batch_id": batch})
             conn.refresh()
             print("   visibility_1 snapshot written", flush=True)
         timings[f"batch{batch}"] = time.perf_counter() - t0
@@ -250,7 +250,7 @@ def main() -> None:
 
     if full_run:
         print("\n>> end-state: visibility_2 snapshot + audit_alerts", flush=True)
-        run_sql_file(conn, "visibility_2.sql", {})
+        run_sql_file(conn, "visibility_2.sql", {"batch_id": args.batches})
         run_sql_file(conn, "audit_alerts.sql", {})
         conn.refresh()
 

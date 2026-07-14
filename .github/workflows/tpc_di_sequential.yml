@@ -145,8 +145,20 @@ jobs:
           echo "::add-mask::$TOKEN"
           echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
-      - name: Sequential load + dbt test + audit (full 3-batch run)
-        run: python ./sequential/scripts/run.py --skip-generate --target onelake --batches 3
+      # The load writes the warehouse + the full DImessages log (batch checkpoints,
+      # visibility snapshots, alerts) and runs dbt test — but NOT the audit (--skip-audit),
+      # so the Appendix-A audit is its own CI step below (clearer pass/fail in the UI).
+      - name: Sequential load + dbt test (full 3-batch run)
+        run: python ./sequential/scripts/run.py --skip-generate --target onelake --batches 3 --skip-audit
+
+      - name: Re-acquire a fresh OneLake bearer token before the audit
+        run: |
+          TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Full Appendix-A audit (130 checks, blocking)
+        run: python ./sequential/tools/run_sequential_audit.py
 
       - name: Upload sequential logs (always)
         if: always()
