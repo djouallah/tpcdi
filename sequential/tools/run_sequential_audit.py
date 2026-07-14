@@ -207,13 +207,19 @@ def _diagnostics(raw) -> None:
         ("NULL-tier DimCustomer customers (b1) who DO have a valid tier in raw stg_customermgmt",
          "SELECT count(DISTINCT dc.customerid) AS n FROM DimCustomer dc WHERE dc.batchid=1 AND dc.tier IS NULL "
          "AND EXISTS (SELECT 1 FROM stg_customermgmt s WHERE s.customerid=dc.customerid AND s.tier IN (1,2,3))"),
-        ("  ^ those customers: id, dimcust tier, raw stg tiers, actions (samples)",
-         "SELECT dc.customerid, max(dc.tier) AS dimcust_tier, "
-         "  string_agg(DISTINCT coalesce(cast(s.tier AS varchar),'-'), ',') AS stg_tiers, "
-         "  string_agg(DISTINCT s.actiontype, ',') AS actions "
+        ("  ^ those customers: per-action tier in raw stg (does the NEW action carry a tier?)",
+         "SELECT dc.customerid, "
+         "  string_agg(s.actiontype || '=' || coalesce(cast(s.tier AS varchar),'-'), ', ' ORDER BY s.update_ts) AS action_tiers "
          "FROM DimCustomer dc JOIN stg_customermgmt s ON s.customerid=dc.customerid "
          "WHERE dc.batchid=1 AND dc.tier IS NULL "
-         "GROUP BY dc.customerid HAVING max(s.tier) IN (1,2,3) LIMIT 10"),
+         "GROUP BY dc.customerid HAVING max(s.tier) IN (1,2,3) LIMIT 12"),
+        ("Of those NULL-tier-but-valid-stg customers, how many have the tier on their NEW action",
+         "SELECT count(*) FILTER (WHERE new_tier IN (1,2,3)) AS tier_on_new, "
+         "count(*) FILTER (WHERE new_tier IS NULL) AS tier_only_later FROM ("
+         "  SELECT dc.customerid, max(s.tier) FILTER (WHERE s.actiontype='NEW') AS new_tier "
+         "  FROM DimCustomer dc JOIN stg_customermgmt s ON s.customerid=dc.customerid "
+         "  WHERE dc.batchid=1 AND dc.tier IS NULL "
+         "  GROUP BY dc.customerid HAVING max(s.tier) IN (1,2,3)) x"),
     ]
     for label, sql in queries:
         try:
