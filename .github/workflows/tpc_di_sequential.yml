@@ -1,0 +1,160 @@
+name: tpc-di-sequential
+
+# TPC-DI SEQUENTIAL (3-batch) mode — the spec's real execution model: a historical load
+# (Batch1) then two incremental CDC batches (Batch2, Batch3), per-batch validation rows
+# written to DImessages, and the COMPLETE Appendix-A audit at the end. Runs the sequential/
+# dbt project into a SEPARATE schema (tpcdi<N>_seq) in the same `tpcdi` lakehouse.
+#
+# This workflow is FULLY INDEPENDENT of the single-pass workflow (tpc_di.yml): it creates /
+# resolves the lakehouse and streams its OWN seed (idempotent — a fast cache-hit when the
+# single-pass run already produced it), so it never waits on the single-pass warehouse
+# build. The only shared asset is the raw OneLake seed (Files/tpcdi/sf<N>); the two modes
+# write different schemas and never collide.
+#
+# Requires the same two repo secrets as tpc_di.yml (AZURE_CLIENT_ID, AZURE_TENANT_ID).
+on:
+  push:
+    branches: ["**"]
+    # Only sequential-mode changes (and this workflow / shared requirements) trigger it —
+    # a single-pass-only change must not rerun the sequential load.
+    paths:
+      - "sequential/**"
+      - "requirements.txt"
+      - ".github/workflows/tpc_di_sequential.yml"
+    paths-ignore:
+      - "**/*.md"
+  pull_request:
+    paths:
+      - "sequential/**"
+      - "requirements.txt"
+      - ".github/workflows/tpc_di_sequential.yml"
+    paths-ignore:
+      - "**/*.md"
+  workflow_dispatch:
+    inputs:
+      scale_factor:
+        description: "TPC-DI scale factor (min 3)"
+        type: string
+        default: "3"
+
+permissions:
+  contents: read
+  id-token: write
+
+# One sequential run at a time — every run writes the same tpcdi<N>_seq schema. A separate
+# group from the single-pass workflow, so the two modes run independently (they touch
+# disjoint schemas; the only shared asset, the seed, is written idempotently).
+concurrency:
+  group: tpcdi-onelake-seq
+  cancel-in-progress: false
+
+jobs:
+  tpc-di-sequential:
+    runs-on: ubuntu-latest
+    env:
+      TPCDI_SF: ${{ inputs.scale_factor || vars.TPCDI_SF || '3' }}
+      TPCDI_GEN_TIMEOUT: '10800'
+      TPCDI_JVM_XMX: '4g'
+      TPCDI_STAGING: /mnt/tpcdi/staging
+      TPCDI_WORK: /mnt/tpcdi/work
+      WS_ID: 1c52481c-0523-4a5a-bbde-fdc932bd77c2
+      LH_NAME: tpcdi
+      # Sequential warehouse schema — sibling of the single-pass tpcdi<SF>.
+      DBT_SCHEMA: tpcdi${{ inputs.scale_factor || vars.TPCDI_SF || '3' }}_seq
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_TRANSPORT_OPTION_TYPE: curl
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show runner disk (per-table-streaming ceiling — largest single table must fit)
+        run: df -h / /mnt 2>/dev/null || df -h
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # DIGen ships PDGF built with an Eclipse jar-in-jar loader that breaks on Java 9+.
+          java-version: '8'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install duckrun (dbt-duckdb + duckdb + deltalake) + obstore
+        run: pip install --quiet -r requirements.txt
+
+      - name: Azure login (OIDC federation — no client secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Create the dedicated 'tpcdi' lakehouse (idempotent) + resolve its OneLake paths
+        run: |
+          set -euo pipefail
+          BASE="https://api.fabric.microsoft.com/v1/workspaces/$WS_ID/lakehouses"
+          find_lh() {
+            az rest --method get --resource https://api.fabric.microsoft.com --url "$BASE" \
+              --query "value[?displayName=='$LH_NAME'].id | [0]" -o tsv 2>/dev/null
+          }
+          LH_ID="$(find_lh || true)"
+          if [ -z "${LH_ID:-}" ] || [ "$LH_ID" = "None" ]; then
+            echo "creating schema-enabled lakehouse '$LH_NAME' in workspace $WS_ID ..."
+            az rest --method post --resource https://api.fabric.microsoft.com --url "$BASE" \
+              --headers "Content-Type=application/json" \
+              --body '{"displayName":"'"$LH_NAME"'","creationPayload":{"enableSchemas":true}}' >/dev/null || true
+            for i in $(seq 1 12); do
+              sleep 5; LH_ID="$(find_lh || true)"
+              if [ -n "${LH_ID:-}" ] && [ "$LH_ID" != "None" ]; then break; fi
+              echo "  waiting for '$LH_NAME' to appear ($i/12)..."
+            done
+          else
+            echo "lakehouse '$LH_NAME' already exists ($LH_ID) — reusing."
+          fi
+          if [ -z "${LH_ID:-}" ] || [ "$LH_ID" = "None" ]; then
+            echo "lakehouse '$LH_NAME' was not visible after creation"; exit 1
+          fi
+          ROOT="abfss://$WS_ID@onelake.dfs.fabric.microsoft.com/$LH_ID"
+          {
+            echo "WAREHOUSE_PATH=$ROOT/Tables"
+            echo "TPCDI_DIR=$ROOT/Files/tpcdi/sf${TPCDI_SF}"
+          } >> "$GITHUB_ENV"
+          echo "lakehouse '$LH_NAME' = $LH_ID"
+
+      - name: Acquire a fresh OneLake bearer token
+        run: |
+          TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      # Idempotent seed: streams one PDGF table at a time to the SAME Files/tpcdi/sf<N> the
+      # single-pass mode uses. A full cache hit (data already present from either workflow)
+      # finishes in seconds and clones no datagen toolkit — so this makes the sequential
+      # workflow self-sufficient without ever rebuilding the single-pass warehouse.
+      - name: Generate + stream the seed to OneLake (per-table, resumable)
+        run: |
+          sudo mkdir -p /mnt/tpcdi && sudo chown "$USER:$USER" /mnt/tpcdi
+          python ./sequential/scripts/stream_seed.py --sf "${TPCDI_SF}" --prefix "tpcdi/sf${TPCDI_SF}"
+
+      - name: dbt deps (sequential project — dbt_utils)
+        run: dbt deps --project-dir sequential --profiles-dir sequential
+
+      # A fresh token before the long 3-batch load + test + audit (a big build can outlast
+      # the ~1h token; the adapter also re-mints mid-run via GitHub OIDC).
+      - name: Re-acquire a fresh OneLake bearer token before the load
+        run: |
+          TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Sequential load + dbt test + audit (full 3-batch run)
+        run: python ./sequential/scripts/run.py --skip-generate --target onelake --batches 3
+
+      - name: Upload sequential logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tpc-di-sequential-logs
+          path: |
+            sequential/logs/
+            sequential/target/
+          if-no-files-found: ignore
