@@ -1,0 +1,159 @@
+version: 2
+
+# Incremental-layer tests: the SCD2 customer/account dimensions, the trade dimension, the prospect
+# dimension, and the four facts. Every surrogate FK gets a `relationships` test (referential
+# integrity — it ignores NULLs); `not_null` is added only where a NULL would be a genuine load bug:
+# the FK set the warehouse audit already asserts non-null, plus the date/time SKs that must always
+# resolve. SCD2 grain = business key + effectivedate.
+models:
+  - name: DimCustomer
+    description: "Customer dimension (SCD2 — Batch1 historical merged with Batch2/3 CDC)."
+    columns:
+      - name: sk_customerid
+        tests: [unique, not_null]
+      - name: customerid
+        tests: [not_null]
+      - name: status
+        tests:
+          - accepted_values: {values: ['Active', 'Inactive']}
+      - name: gender
+        tests:
+          - accepted_values: {values: ['M', 'F', 'U']}
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [customerid, effectivedate]
+
+  - name: DimAccount
+    description: "Account dimension (SCD2)."
+    columns:
+      - name: sk_accountid
+        tests: [unique, not_null]
+      - name: accountid
+        tests: [not_null]
+      - name: status
+        tests:
+          - accepted_values: {values: ['Active', 'Inactive']}
+      # taxstatus is only guaranteed 0/1/2 for the Batch1 historical slice (CDC batches carry other
+      # values) — the warehouse audit covers that slice with a batchid=1 filter, so no domain test here.
+      - name: sk_customerid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimCustomer'), field: sk_customerid}
+      - name: sk_brokerid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimBroker'), field: sk_brokerid}
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [accountid, effectivedate]
+
+  - name: DimTrade
+    description: "Trade dimension — one row per trade."
+    columns:
+      - name: tradeid
+        tests: [unique, not_null]
+      - name: sk_customerid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimCustomer'), field: sk_customerid}
+      - name: sk_accountid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimAccount'), field: sk_accountid}
+      - name: sk_securityid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimSecurity'), field: sk_securityid}
+      - name: sk_companyid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimCompany'), field: sk_companyid}
+      - name: sk_brokerid
+        tests:
+          - relationships: {to: ref('DimBroker'), field: sk_brokerid}
+      - name: sk_createdateid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimDate'), field: sk_dateid}
+
+  - name: Prospect
+    description: "Prospect dimension (one row per agency prospect)."
+    columns:
+      - name: agencyid
+        tests: [not_null]
+      - name: sk_recorddateid
+        tests:
+          - relationships: {to: ref('DimDate'), field: sk_dateid}
+
+  - name: FactCashBalances
+    columns:
+      - name: sk_customerid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimCustomer'), field: sk_customerid}
+      - name: sk_accountid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimAccount'), field: sk_accountid}
+      - name: sk_dateid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimDate'), field: sk_dateid}
+
+  - name: FactHoldings
+    columns:
+      - name: sk_customerid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimCustomer'), field: sk_customerid}
+      - name: sk_accountid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimAccount'), field: sk_accountid}
+      - name: sk_securityid
+        tests:
+          - relationships: {to: ref('DimSecurity'), field: sk_securityid}
+      - name: sk_companyid
+        tests:
+          - relationships: {to: ref('DimCompany'), field: sk_companyid}
+      - name: sk_dateid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimDate'), field: sk_dateid}
+      - name: sk_timeid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimTime'), field: sk_timeid}
+
+  - name: FactMarketHistory
+    columns:
+      - name: sk_securityid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimSecurity'), field: sk_securityid}
+      - name: sk_companyid
+        tests:
+          - relationships: {to: ref('DimCompany'), field: sk_companyid}
+      - name: sk_dateid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimDate'), field: sk_dateid}
+
+  - name: FactWatches
+    columns:
+      - name: sk_customerid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimCustomer'), field: sk_customerid}
+      - name: sk_securityid
+        tests:
+          - not_null
+          - relationships: {to: ref('DimSecurity'), field: sk_securityid}
+      - name: sk_dateid_dateplaced
+        tests:
+          - not_null
+          - relationships: {to: ref('DimDate'), field: sk_dateid}
+      # dateremoved is NULL while a watch is still active — referential integrity only, no not_null.
+      - name: sk_dateid_dateremoved
+        tests:
+          - relationships: {to: ref('DimDate'), field: sk_dateid}
