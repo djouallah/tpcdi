@@ -218,6 +218,16 @@ def main() -> None:
         print(">> init-only done.", flush=True)
         return
 
+    # Batch-0 initial-condition checkpoint (empty-DW PCR + 24 zero Validation rows) — the
+    # audit requires DImessages to record the pre-Batch1 state. Must precede batch 1.
+    n_init = run_sql_file(conn, "batch_initial.sql", {})
+    conn.refresh()
+    print(f"   batch 0: initial-condition checkpoint ({n_init} statement(s))", flush=True)
+
+    # A full 3-batch run is the only one that produces a valid Appendix-A audit (its
+    # DImessages checks require batches 0..3); a partial run loads + tests but skips it.
+    full_run = args.batches == 3
+
     timings: dict[str, float] = {}
     for batch in BATCHES[:args.batches]:
         print(f"\n>> batch {batch}: dbt run (sequential project)", flush=True)
@@ -228,24 +238,39 @@ def main() -> None:
         n_pcr = run_sql_file(conn, "batch_complete.sql", {"batch_id": batch})
         n_val = run_sql_file(conn, "batch_validation.sql", {"batch_id": batch})
         conn.refresh()
+        # Data Visibility snapshot #1 after the historical load; #2 runs at end-of-run. The
+        # audit asserts row counts are non-decreasing from snapshot 1 to snapshot 2.
+        if batch == 1:
+            run_sql_file(conn, "visibility_1.sql", {})
+            conn.refresh()
+            print("   visibility_1 snapshot written", flush=True)
         timings[f"batch{batch}"] = time.perf_counter() - t0
         print(f"   batch {batch}: {timings[f'batch{batch}']:.1f}s "
               f"({n_pcr} phase-complete + {n_val} validation statement(s))", flush=True)
 
+    if full_run:
+        print("\n>> end-state: visibility_2 snapshot + audit_alerts", flush=True)
+        run_sql_file(conn, "visibility_2.sql", {})
+        run_sql_file(conn, "audit_alerts.sql", {})
+        conn.refresh()
+
     if not args.skip_test:
-        print("\n>> dbt test --select tag:sequential", flush=True)
+        print("\n>> dbt test", flush=True)
         dbt_test(env)
 
-    if not args.skip_audit:
+    if not args.skip_audit and full_run:
         audit = os.path.join(PROJ, "tools", "run_sequential_audit.py")
         if os.path.exists(audit):
-            print("\n>> audit: tools/run_sequential_audit.py", flush=True)
+            print("\n>> audit: tools/run_sequential_audit.py (full Appendix-A)", flush=True)
             t0 = time.perf_counter()
             rc = subprocess.run([sys.executable, audit], env=env).returncode
             timings["audit"] = time.perf_counter() - t0
         else:
-            print("\n>> (skip: tools/run_sequential_audit.py not present yet)", flush=True)
+            print("\n>> (skip: tools/run_sequential_audit.py not present)", flush=True)
             rc = 0
+    elif not args.skip_audit:
+        print("\n>> (skip audit: needs a full 3-batch run — use --batches 3)", flush=True)
+        rc = 0
     else:
         rc = 0
 
