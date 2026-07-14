@@ -202,6 +202,18 @@ def _diagnostics(raw) -> None:
         ("DOB recompute with the birthday-accurate rule (should be 8 for batch 1)",
          "SELECT count(DISTINCT customerid) AS n FROM DimCustomer dc JOIN BatchDate bd USING (batchid) "
          "WHERE batchid=1 AND (dob <= batchdate - INTERVAL 100 YEAR OR dob > batchdate)"),
+        # The tier gap is one extra NULL-tier customer: is that NULL genuine (source never
+        # gave a tier) or did the load drop a valid tier the raw XML actually has?
+        ("NULL-tier DimCustomer customers (b1) who DO have a valid tier in raw stg_customermgmt",
+         "SELECT count(DISTINCT dc.customerid) AS n FROM DimCustomer dc WHERE dc.batchid=1 AND dc.tier IS NULL "
+         "AND EXISTS (SELECT 1 FROM stg_customermgmt s WHERE s.customerid=dc.customerid AND s.tier IN (1,2,3))"),
+        ("  ^ those customers: id, dimcust tier, raw stg tiers, actions (samples)",
+         "SELECT dc.customerid, max(dc.tier) AS dimcust_tier, "
+         "  string_agg(DISTINCT coalesce(cast(s.tier AS varchar),'-'), ',') AS stg_tiers, "
+         "  string_agg(DISTINCT s.actiontype, ',') AS actions "
+         "FROM DimCustomer dc JOIN stg_customermgmt s ON s.customerid=dc.customerid "
+         "WHERE dc.batchid=1 AND dc.tier IS NULL "
+         "GROUP BY dc.customerid HAVING max(s.tier) IN (1,2,3) LIMIT 10"),
     ]
     for label, sql in queries:
         try:
