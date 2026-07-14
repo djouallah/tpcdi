@@ -8,7 +8,7 @@
 -- FactCashBalances reads batchid=N. Batch1 CashTransaction.txt is 4-col; Batch2/3 add a
 -- cdc_flag/cdc_dsn prefix (6-col).
 with alltransactions as (
-  select accountid, to_date(ct_dts) as datevalue, sum(ct_amt) as account_daily_total, 1 as batchid
+  select accountid, date(ct_dts) as datevalue, sum(ct_amt) as account_daily_total, 1 as batchid
   from {{ read_pipe('Batch1/CashTransaction.txt',
     "{'accountid': 'BIGINT', 'ct_dts': 'TIMESTAMP', 'ct_amt': 'DOUBLE', 'ct_name': 'VARCHAR'}") }}
   group by all
