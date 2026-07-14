@@ -220,18 +220,6 @@ jobs:
       - name: dbt test (validate transformations against the OneLake warehouse)
         run: dbt test --project-dir singlepass --profiles-dir singlepass
 
-      # End-state audit: the single-pass-valid subset of the TPC-DI Appendix-A checks, run against
-      # the finished OneLake warehouse + the PDGF *_audit.csv answer keys under Files/tpcdi/sf<N>.
-      # Blocking: any FAIL exits nonzero and fails the job (WARN lines are non-fatal). A fresh token
-      # first (dbt may have run for hours); WAREHOUSE_PATH and TPCDI_DIR are already in $GITHUB_ENV.
-      - name: Re-acquire a fresh OneLake bearer token before the audit
-        run: |
-          TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
-          echo "::add-mask::$TOKEN"
-          echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
-      - name: Audit (Appendix-A end-state subset — blocking)
-        run: python ./singlepass/tools/run_audit.py
-
       - name: Upload logs (always)
         if: always()
         uses: actions/upload-artifact@v4

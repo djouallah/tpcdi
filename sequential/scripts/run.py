@@ -78,9 +78,9 @@ WHERE 1 = 0
 def audit_ddl(seed: str) -> str:
     """CREATE OR REPLACE the Audit answer-key table from every Batch*/*_audit.csv.
 
-    Mirrors tools/run_audit.py's ``load_audit`` (same positional PDGF layout and the
-    ``try_cast(BatchID) IS NOT NULL`` header/junk filter) but materializes a persistent
-    Delta table — the sequential batch_validation and the full audit both read it.
+    Loads the positional PDGF answer-key layout (DataSet, BatchID, Date, Attribute, Value,
+    DValue) and drops any header/junk row via ``try_cast(BatchID) IS NOT NULL``, into a
+    persistent Delta table — the sequential batch_validation and the full audit both read it.
     """
     glob = f"{str(seed).rstrip('/')}/Batch*/*_audit.csv"
     read = (f"read_csv('{glob}', header=false, all_varchar=true, delim=',', "
