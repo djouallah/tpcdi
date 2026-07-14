@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
 
@@ -69,57 +70,83 @@ def main() -> None:
     print(f"\n  warehouse: {args.warehouse} (schema {args.schema})")
     print(f"  audit:     {AUDIT_SQL}\n")
 
-    # Retry the whole audit on a transient OneLake/object-store error (the big query scans
-    # every Delta table's log; a network blip mid-scan otherwise fails the step outright).
-    rows = None
-    for attempt in range(1, 4):
-        try:
-            rows = raw.execute(sql).fetchall()
-            break
-        except Exception as e:
-            msg = str(e).splitlines()[0]
-            transient = any(s in str(e) for s in (
-                "ObjectStoreError", "error sending request", "HTTP error",
-                "timed out", "connection", "Connection", "reset"))
-            if transient and attempt < 3:
-                print(f"  (attempt {attempt} hit a transient store error, retrying: {msg[:90]})",
-                      flush=True)
-                time.sleep(10)
-                continue
-            sys.exit(f"ERROR: audit query failed to execute: {e}")
-
-    # The classic audit returns (Test, Batch, Result, Description). A check passes iff its
-    # Result is exactly 'OK'; anything else (the check's else-branch message) is a failure.
-    print(f"  {'status':<6} {'test':<44}{'batch':>6}  detail")
-    print("  " + "-" * 96)
-    n_pass = n_fail = 0
+    # Run the audit ONE query per check (not one giant UNION ALL) so progress is visible
+    # live — each line prints as its check finishes, and a slow/hanging check is obvious by
+    # name instead of a silent multi-minute stall. Every check returns (Test, Batch, Result,
+    # Description); a check passes iff Result is exactly 'OK'.
+    checks = _split_checks(sql)
+    print(f"  running {len(checks)} checks (one query each):\n")
+    print(f"  {'#':>4}  {'status':<6} {'test':<42}{'batch':>6}  detail")
+    print("  " + "-" * 98)
+    n_pass = n_fail = n_err = 0
+    total = 0
     failures = []
-    for row in rows:
-        test, batch, result, description = row[0], row[1], row[2], row[3]
-        ok = (result == "OK")
-        status = "PASS" if ok else "FAIL"
-        if ok:
-            n_pass += 1
-        else:
-            n_fail += 1
-            failures.append((test, batch, result, description))
-        b = "" if batch is None else str(batch)
-        detail = description if ok else f"{result}  ({description})"
-        print(f"  {status:<6} {str(test):<44}{b:>6}  {detail}")
-    print("  " + "-" * 96)
-    print(f"  {len(rows)} checks: {n_pass} passed, {n_fail} failed")
+    for i, csql in enumerate(checks, 1):
+        try:
+            crows = _run_one(raw, csql)
+        except Exception as e:
+            n_err += 1
+            line = str(e).splitlines()[0]
+            failures.append((f"check #{i}", None, "ERROR", line[:80]))
+            print(f"  {i:>4}  {'ERROR':<6} {'(query failed)':<42}{'':>6}  {line[:56]}", flush=True)
+            continue
+        for row in crows:
+            total += 1
+            test, batch, result, description = row[0], row[1], row[2], row[3]
+            ok = (result == "OK")
+            status = "PASS" if ok else "FAIL"
+            if ok:
+                n_pass += 1
+            else:
+                n_fail += 1
+                failures.append((test, batch, result, description))
+            b = "" if batch is None else str(batch)
+            detail = description if ok else f"{result}  ({description})"
+            print(f"  {i:>4}  {status:<6} {str(test):<42}{b:>6}  {detail}", flush=True)
+    print("  " + "-" * 98)
+    print(f"  {len(checks)} checks, {total} results: {n_pass} passed, {n_fail} failed"
+          + (f", {n_err} errored" if n_err else ""))
 
-    if not rows:
-        sys.exit("\n  AUDIT PRODUCED NO ROWS — the audit query returned nothing; "
-                 "the warehouse/DImessages may be empty.")
-    if n_fail:
+    if total == 0 and n_err == 0:
+        sys.exit("\n  AUDIT PRODUCED NO ROWS — the warehouse/DImessages may be empty.")
+    if n_fail or n_err:
         print("\n  FAILURES:")
         for test, batch, result, description in failures:
             b = "" if batch is None else f" [batch {batch}]"
             print(f"    - {test}{b}: {result}  ({description})")
         _diagnostics(raw)
-        sys.exit(f"\n  AUDIT FAILED — {n_fail} check(s) not OK.")
+        sys.exit(f"\n  AUDIT FAILED — {n_fail + n_err} check(s) not OK.")
     print("\n  AUDIT PASSED — all 130 Appendix-A checks OK.")
+
+
+def _split_checks(sql: str):
+    """Split the ported audit (one `select * from ( <check> union all <check> … ) q`) into
+    its individual check SELECTs. Every `union all` in this audit is top-level (none are
+    nested inside a check's subqueries), so a plain split on `union all` is exact."""
+    # Strip line comments first — the header prose itself contains "select * from ( … ) q",
+    # which would otherwise fool the wrapper detection. (No `--` appears inside a string
+    # literal in this audit.)
+    body = "\n".join((ln if ln.find("--") < 0 else ln[:ln.find("--")]) for ln in sql.splitlines())
+    m = re.search(r"select\s+\*\s+from\s*\(", body, re.IGNORECASE)
+    inner = body[m.end():] if m else body
+    inner = re.sub(r"\)\s*q\s*;?\s*$", "", inner.strip())      # drop the closing ') q'
+    parts = re.split(r"\n\s*union all\s*\n", inner, flags=re.IGNORECASE)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _run_one(raw, csql: str):
+    """Execute one check, retrying a couple of times on a transient object-store blip."""
+    for attempt in range(1, 4):
+        try:
+            return raw.execute(csql).fetchall()
+        except Exception as e:
+            transient = any(s in str(e) for s in (
+                "ObjectStoreError", "error sending request", "HTTP error",
+                "timed out", "connection", "Connection", "reset"))
+            if transient and attempt < 3:
+                time.sleep(5)
+                continue
+            raise
 
 
 def _diagnostics(raw) -> None:
