@@ -10,8 +10,18 @@
 -- effective that day.
 {% if is_incremental() %}
 
--- Incremental append branch implemented in Stage 7. No-op placeholder until then.
-select * from {{ this }} limit 0
+-- Incremental (batch N): append this batch's running balances; join the current account
+-- version (per classic). Ported from gold/FactCashBalances Incremental.sql.
+{% set b = var('batch') %}
+select
+  a.sk_customerid,
+  a.sk_accountid,
+  cast(strftime(c.datevalue, '%Y%m%d') as bigint) as sk_dateid,
+  c.cash,
+  c.batchid
+from {{ ref('bronzecashtransaction') }} c
+join {{ ref('DimAccount') }} a on c.accountid = a.accountid and a.iscurrent
+where c.batchid = {{ b }}
 
 {% else %}
 
