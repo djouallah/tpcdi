@@ -310,6 +310,50 @@ def _diagnostics(raw) -> None:
          "  any_value(bd.batchdate) AS batchdate "
          "FROM DimCustomer dc JOIN BatchDate bd USING(batchid) "
          "WHERE dc.batchid IN (2,3) GROUP BY dc.batchid ORDER BY dc.batchid"),
+        # --- Root-cause probes: is the divergence webbed extraction, source truth, or
+        #     whole-second ordering ties? (the DimCustomer transform is a verbatim port of the
+        #     reference, so a mismatch must originate in stg_customermgmt content or the CDC path)
+        # Q1: did webbed silently drop actions, or is the stg action set complete? Compare the
+        # stg per-actiontype counts to the PDGF answer-key action tallies.
+        ("Q1 stg_customermgmt action count by actiontype",
+         "SELECT actiontype, count(*) AS n FROM stg_customermgmt GROUP BY actiontype ORDER BY actiontype"),
+        ("Q1 Audit answer-key action tallies (C_NEW/ADDACCT/UPDACCT/UPDCUST/CLOSEACCT/INACT/ID_HIST)",
+         "SELECT dataset, attribute, sum(value) AS n FROM Audit "
+         "WHERE attribute IN ('C_NEW','C_ADDACCT','C_UPDACCT','C_UPDCUST','C_CLOSEACCT','C_INACT','C_ID_HIST') "
+         "GROUP BY dataset, attribute ORDER BY dataset, attribute"),
+        # Q2: extraction-bug vs source-truth. For null-tier customers, dump per-action whether the
+        # OTHER Customer attributes are present on the NEW action. If NEW carries tax/gndr but
+        # tier=-/dob=- -> the source NEW genuinely lacks tier (webbed is fine). If NEW is all '-'
+        # -> webbed dropped the whole Customer parse on NEW.
+        ("Q2 null-tier customers: per-action attribute presence (tier/dob/tax/gndr) by update_ts (10)",
+         "SELECT s.customerid, string_agg("
+         "  s.actiontype || ':t=' || coalesce(cast(s.tier AS varchar),'-')"
+         "  || ',dob=' || coalesce(cast(s.dob AS varchar),'-')"
+         "  || ',tax=' || (CASE WHEN s.taxid IS NULL THEN '-' ELSE 'Y' END)"
+         "  || ',g=' || coalesce(s.gender,'-'), ' | ' ORDER BY s.update_ts) AS actions "
+         "FROM (SELECT DISTINCT customerid FROM DimCustomer WHERE batchid=1 AND tier IS NULL) dc "
+         "JOIN stg_customermgmt s ON s.customerid=dc.customerid "
+         "GROUP BY s.customerid HAVING max(s.tier) IN (1,2,3) LIMIT 10"),
+        # Q3: whole-second ordering ties. try_cast preserves sub-second precision in DuckDB, so
+        # sub_second=0 means the SOURCE ActionTS is whole-second. That makes same-second ties
+        # possible, and lead()/last_value() over `order by update_ts` can then collapse a
+        # DIFFERENT version than Spark. Count the collapse-relevant (NEW/INACT/UPDCUST) ties.
+        ("Q3 same-second ordering ties among NEW/INACT/UPDCUST actions (tie pairs, extra tied rows)",
+         "SELECT count(*) AS tie_pairs, coalesce(sum(n-1),0) AS extra_tied_rows FROM ("
+         "  SELECT customerid, update_ts, count(*) AS n FROM stg_customermgmt "
+         "  WHERE actiontype IN ('NEW','INACT','UPDCUST') "
+         "  GROUP BY customerid, update_ts HAVING count(*) > 1)"),
+        # Q4: FactWatches cascade proxy. WatchHistory.txt is not a warehouse table, so instead
+        # count customers whose first surviving DimCustomer version starts AFTER their NEW action
+        # date -> their NEW version was collapsed, so any watch placed on the NEW day falls before
+        # the earliest [effectivedate,enddate) range and is dropped by the historical join.
+        ("Q4 customers whose 1st DimCustomer version starts after their NEW date (watch-drop cause)",
+         "SELECT count(*) AS missing_early_coverage FROM ("
+         "  SELECT dc.customerid, min(dc.effectivedate) AS first_ver, "
+         "    (SELECT min(date(s.update_ts)) FROM stg_customermgmt s "
+         "     WHERE s.customerid=dc.customerid AND s.actiontype='NEW') AS new_date "
+         "  FROM DimCustomer dc WHERE dc.batchid=1 GROUP BY dc.customerid) "
+         "WHERE new_date IS NOT NULL AND first_ver > new_date"),
     ]
 
     for label, sql in queries:

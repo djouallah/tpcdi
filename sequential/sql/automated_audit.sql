@@ -1668,10 +1668,14 @@ from (
         ) = (
           select count(*)
           from DimTrade a
-            join DimDate _d on _d.SK_DateID = a.SK_CreateDateID
-            join DimBroker c on a.SK_BrokerID = c.SK_BrokerID
-            and c.EffectiveDate <= _d.DateValue
-            and _d.DateValue <= c.EndDate
+          where exists (
+            select 1
+            from DimDate _d
+              join DimBroker c on a.SK_BrokerID = c.SK_BrokerID
+              and c.EffectiveDate <= _d.DateValue
+              and _d.DateValue <= c.EndDate
+            where _d.SK_DateID = a.SK_CreateDateID
+          )
         ) --(select DateValue from DimDate where SK_DateID = a.SK_CreateDateID) and (select DateValue from DimDate where SK_DateID = a.SK_CreateDateID) <= c.EndDate)
         then 'OK'
         else 'Bad join'
@@ -1684,10 +1688,14 @@ from (
         ) = (
           select count(*)
           from DimTrade a
-            join DimDate _d on _d.SK_DateID = a.SK_CreateDateID
-            join DimCompany c on a.SK_CompanyID = c.SK_CompanyID
-            and c.EffectiveDate <= _d.DateValue
-            and _d.DateValue <= c.EndDate
+          where exists (
+            select 1
+            from DimDate _d
+              join DimCompany c on a.SK_CompanyID = c.SK_CompanyID
+              and c.EffectiveDate <= _d.DateValue
+              and _d.DateValue <= c.EndDate
+            where _d.SK_DateID = a.SK_CreateDateID
+          )
         ) --(select DateValue from DimDate where SK_DateID = a.SK_CreateDateID) and (select DateValue from DimDate where SK_DateID = a.SK_CreateDateID) <= c.EndDate)
         then 'OK'
         else 'Bad join'
@@ -1700,10 +1708,14 @@ from (
         ) = (
           select count(*)
           from DimTrade a
-            join DimDate _d on _d.SK_DateID = a.SK_CreateDateID
-            join DimSecurity c on a.SK_SecurityID = c.SK_SecurityID
-            and c.EffectiveDate <= _d.DateValue
-            and _d.DateValue <= c.EndDate
+          where exists (
+            select 1
+            from DimDate _d
+              join DimSecurity c on a.SK_SecurityID = c.SK_SecurityID
+              and c.EffectiveDate <= _d.DateValue
+              and _d.DateValue <= c.EndDate
+            where _d.SK_DateID = a.SK_CreateDateID
+          )
         ) --(select DateValue from DimDate where SK_DateID = a.SK_CreateDateID) and (select DateValue from DimDate where SK_DateID = a.SK_CreateDateID) <= c.EndDate)
         then 'OK'
         else 'Bad join'
@@ -1716,10 +1728,14 @@ from (
         ) = (
           select count(*)
           from DimTrade a
-            join DimDate _d on _d.SK_DateID = a.SK_CreateDateID
-            join DimCustomer c on a.SK_CustomerID = c.SK_CustomerID
-            and c.EffectiveDate <= _d.DateValue
-            and _d.DateValue <= c.EndDate
+          where exists (
+            select 1
+            from DimDate _d
+              join DimCustomer c on a.SK_CustomerID = c.SK_CustomerID
+              and c.EffectiveDate <= _d.DateValue
+              and _d.DateValue <= c.EndDate
+            where _d.SK_DateID = a.SK_CreateDateID
+          )
         ) --(select DateValue from DimDate where SK_DateID = a.SK_CreateDateID) and (select DateValue from DimDate where SK_DateID = a.SK_CreateDateID) <= c.EndDate)
         then 'OK'
         else 'Bad join'
@@ -1732,10 +1748,14 @@ from (
         ) = (
           select count(*)
           from DimTrade a
-            join DimDate _d on _d.SK_DateID = a.SK_CreateDateID
-            join DimAccount c on a.SK_AccountID = c.SK_AccountID
-            and c.EffectiveDate <= _d.DateValue
-            and _d.DateValue <= c.EndDate
+          where exists (
+            select 1
+            from DimDate _d
+              join DimAccount c on a.SK_AccountID = c.SK_AccountID
+              and c.EffectiveDate <= _d.DateValue
+              and _d.DateValue <= c.EndDate
+            where _d.SK_DateID = a.SK_CreateDateID
+          )
         ) --(select DateValue from DimDate where SK_DateID = a.SK_CreateDateID) and (select DateValue from DimDate where SK_DateID = a.SK_CreateDateID) <= c.EndDate)
         then 'OK'
         else 'Bad join'
