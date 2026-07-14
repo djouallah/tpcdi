@@ -296,8 +296,8 @@ jobs:
           echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
       - name: dbt deps (sequential project — dbt_utils)
         run: dbt deps --project-dir sequential --profiles-dir sequential
-      - name: Sequential load + dbt test (historical batch only during build-out)
-        run: python ./sequential/scripts/run.py --skip-generate --target onelake --batches 1
+      - name: Sequential load + dbt test (full 3-batch run)
+        run: python ./sequential/scripts/run.py --skip-generate --target onelake --batches 3
       - name: Upload sequential logs (always)
         if: always()
         uses: actions/upload-artifact@v4
