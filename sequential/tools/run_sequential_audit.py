@@ -354,6 +354,39 @@ def _diagnostics(raw) -> None:
          "     WHERE s.customerid=dc.customerid AND s.actiontype='NEW') AS new_date "
          "  FROM DimCustomer dc WHERE dc.batchid=1 GROUP BY dc.customerid) "
          "WHERE new_date IS NOT NULL AND first_ver > new_date"),
+        # --- Round 2 probes (all warehouse-only): pin DOB b2/3, tier +35, DimCustomer -2 ---
+        # DOB b2/3 (0 vs 6 expected). Our audit_alerts groups the DOB rule by the VERSION's
+        # batchid, so batch-2/3 only sees the ~500 new versions (none extreme). The reference
+        # answer key counts customers who CROSS 100y during a batch. Test: per batch, count
+        # extreme-DOB customers three ways -- (ver) scoped to versions with that batchid,
+        # (cur_calyr/cur_bday) over the version CURRENT as of that batchdate under the
+        # calendar-year rule the reference uses vs our birthday-accurate rule. If cur_calyr is
+        # ~319/325/331 then the per-batch increments 319/6/6 match the key -> the fix is to
+        # count newly-extreme current customers per batch, not version-batchid.
+        ("D1 DOB per batch: version-scoped vs current-as-of-batchdate (calyr vs birthday rule)",
+         "SELECT bd.batchid, "
+         "  (SELECT count(DISTINCT dc.customerid) FROM DimCustomer dc WHERE dc.batchid=bd.batchid "
+         "     AND (datediff('year', dc.dob, bd.batchdate) >= 100 OR dc.dob > bd.batchdate)) AS ver_calyr, "
+         "  (SELECT count(*) FROM DimCustomer dc WHERE dc.effectivedate <= bd.batchdate AND bd.batchdate < dc.enddate "
+         "     AND (datediff('year', dc.dob, bd.batchdate) >= 100 OR dc.dob > bd.batchdate)) AS cur_calyr, "
+         "  (SELECT count(*) FROM DimCustomer dc WHERE dc.effectivedate <= bd.batchdate AND bd.batchdate < dc.enddate "
+         "     AND (dc.dob <= bd.batchdate - INTERVAL 100 YEAR OR dc.dob > bd.batchdate)) AS cur_bday "
+         "FROM BatchDate bd WHERE bd.batchid IN (1,2,3) ORDER BY bd.batchid"),
+        # Tier +35 (7844 vs 7809). audit_alerts flags `tier NOT IN (1,2,3) OR tier IS NULL`
+        # (verbatim from the reference). Does dropping the NULL clause match the key 7809?
+        ("D2 tier b1 alert count: with vs without the 'OR tier IS NULL' clause (key=7809)",
+         "SELECT count(DISTINCT customerid) FILTER (WHERE tier NOT IN (1,2,3) OR tier IS NULL) AS with_null, "
+         "  count(DISTINCT customerid) FILTER (WHERE tier NOT IN (1,2,3)) AS without_null "
+         "FROM DimCustomer WHERE batchid=1"),
+        # DimCustomer b1 -2 (217898 vs 217900). With C_ID_HIST=0 every NEW/INACT/UPDCUST action
+        # should yield a surviving version; -2 = two same-day collapses (effectivedate=enddate).
+        # List the culprits: customers whose surviving version count is below their action count.
+        ("D3 DimCustomer b1 collapse victims: customerid, action_count, version_count (sum of gaps=2)",
+         "SELECT s.customerid, s.acts, coalesce(d.vers,0) AS vers FROM "
+         "  (SELECT customerid, count(*) AS acts FROM stg_customermgmt "
+         "   WHERE actiontype IN ('NEW','INACT','UPDCUST') GROUP BY customerid) s "
+         "  LEFT JOIN (SELECT customerid, count(*) AS vers FROM DimCustomer WHERE batchid=1 GROUP BY customerid) d "
+         "  USING(customerid) WHERE coalesce(d.vers,0) < s.acts ORDER BY (s.acts-coalesce(d.vers,0)) DESC LIMIT 20"),
     ]
 
     for label, sql in queries:
