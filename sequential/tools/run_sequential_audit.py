@@ -387,7 +387,40 @@ def _diagnostics(raw) -> None:
          "   WHERE actiontype IN ('NEW','INACT','UPDCUST') GROUP BY customerid) s "
          "  LEFT JOIN (SELECT customerid, count(*) AS vers FROM DimCustomer WHERE batchid=1 GROUP BY customerid) d "
          "  USING(customerid) WHERE coalesce(d.vers,0) < s.acts ORDER BY (s.acts-coalesce(d.vers,0)) DESC LIMIT 20"),
+        # --- Round 3: DOB model + FactWatches join-drop localization ---
+        # D4 DOB gross new crossers per batch: customers whose version current-as-of-batchdate is
+        # extreme (birthday rule) but were NOT extreme in the immediately-prior batch. Batch 1 =
+        # all extreme (319). If this yields 319/6/6 it exactly matches the key and is the fix.
+        ("D4 DOB gross new crossers per batch (birthday rule, current-version-at-batchdate)",
+         "WITH ext AS (SELECT bd.batchid, dc.customerid FROM BatchDate bd "
+         "  JOIN DimCustomer dc ON dc.effectivedate <= bd.batchdate AND bd.batchdate < dc.enddate "
+         "  WHERE bd.batchid IN (1,2,3) AND (dc.dob <= bd.batchdate - INTERVAL 100 YEAR OR dc.dob > bd.batchdate)) "
+         "SELECT batchid, count(*) AS gross_new FROM ext e2 "
+         "WHERE NOT EXISTS (SELECT 1 FROM ext e1 WHERE e1.customerid=e2.customerid AND e1.batchid=e2.batchid-1) "
+         "GROUP BY batchid ORDER BY batchid"),
     ]
+
+    # D5 FactWatches join-drop localization: reads Batch1/WatchHistory.txt straight from the
+    # OneLake seed (TPCDI_DIR) and left-joins the dims to see whether the ~12.3K un-placed
+    # historical watches fail the customer or the security join, and whether it's a missing
+    # entity or a date-range-coverage gap. Skipped when TPCDI_DIR is unset (local runs).
+    _tpcdi_dir = os.environ.get("TPCDI_DIR", "")
+    if _tpcdi_dir:
+        _wh = f"{_tpcdi_dir}/Batch1/WatchHistory.txt"
+        queries.append((
+            "D5 FactWatches Batch1 watch pairs vs customer/security join coverage",
+            "WITH w AS (SELECT w_c_id, w_s_symb, date(min(w_dts)) AS dateplaced FROM read_csv('"
+            + _wh + "', delim='|', header=false, quote='', escape='', nullstr='', null_padding=true, "
+            "columns={'w_c_id':'BIGINT','w_s_symb':'VARCHAR','w_dts':'TIMESTAMP','w_action':'VARCHAR'}) "
+            "GROUP BY w_c_id, w_s_symb) "
+            "SELECT count(*) AS pairs, "
+            "count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM DimCustomer c WHERE c.customerid=w.w_c_id)) AS no_cust_entity, "
+            "count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM DimSecurity s WHERE s.symbol=w.w_s_symb)) AS no_sec_entity, "
+            "count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM DimCustomer c WHERE c.customerid=w.w_c_id "
+            "  AND w.dateplaced >= c.effectivedate AND w.dateplaced < c.enddate)) AS no_cust_range, "
+            "count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM DimSecurity s WHERE s.symbol=w.w_s_symb "
+            "  AND w.dateplaced >= s.effectivedate AND w.dateplaced < s.enddate)) AS no_sec_range "
+            "FROM w"))
 
     for label, sql in queries:
         try:
