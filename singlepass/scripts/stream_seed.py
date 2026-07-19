@@ -132,15 +132,6 @@ def main():
     if not args.warehouse:
         sys.exit("ERROR: --warehouse (or WAREHOUSE_PATH) required")
 
-    # Above the runner's disk ceiling the whole generate→upload loop moves to Fabric compute;
-    # the remote notebook re-enters this script with --remote local. Resumability is identical
-    # (same per-table manifests in OneLake, wherever the generator runs).
-    if args.remote == "remote" or (
-            args.remote == "auto" and args.warehouse.startswith("abfss://") and args.sf > 370):
-        import remote_seed
-        remote_seed.launch(args.sf, args.prefix, args.warehouse)
-        return
-
     staging = os.path.abspath(args.staging)
     chunk = int(os.environ.get("TPCDI_CM_CHUNK", "20000"))
     tables = args.tables or TABLES
@@ -148,7 +139,8 @@ def main():
 
     # Per-table resume (OneLake only): skip tables already present with matching byte sizes, so a
     # re-run after a partial failure regenerates only what's missing. A local warehouse (small-SF
-    # testing) has no manifests — regenerate everything.
+    # testing) has no manifests — regenerate everything. This runs BEFORE the remote dispatch so
+    # a full cache hit never spins up a Fabric notebook just to discover there is nothing to do.
     done, present = [], {}
     if onelake:
         todo, done, present, _manifests = sm.plan_tables(sm.connect(args.warehouse), args.prefix, tables)
@@ -160,6 +152,15 @@ def main():
             print(f"  to-gen : {', '.join(todo)}", flush=True)
     else:
         todo = list(tables)
+
+    # Above the runner's disk ceiling the whole generate→upload loop moves to Fabric compute;
+    # the remote notebook re-enters this script with --remote local. Resumability is identical
+    # (same per-table manifests in OneLake, wherever the generator runs).
+    if todo and (args.remote == "remote" or (
+            args.remote == "auto" and onelake and args.sf > 370)):
+        import remote_seed
+        remote_seed.launch(args.sf, args.prefix, args.warehouse)
+        return
 
     if todo:
         gd._require_java()
