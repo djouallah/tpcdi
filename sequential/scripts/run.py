@@ -172,6 +172,16 @@ def run_sql_file(conn, name: str, subs: dict) -> int:
 REMOTE = {"on": False, "cores": None}
 
 
+def _auto_cores(sf: int) -> int:
+    """Fabric notebook vCores scaled to the scale factor: 8 at sf100, doubling per 10x
+    (16 at sf1000, 32 at sf10000), capped at Fabric's largest size, 64. Memory scales
+    with vCores, and the warehouse (join/spill footprint) scales ~linearly with SF, so a
+    doubling per decade keeps big builds tractable without burning capacity on small ones.
+    Lands only on valid Fabric sizes (8/16/32/64)."""
+    import math
+    return min(64, 8 * 2 ** int(math.log10(max(sf, 100) / 100)))
+
+
 def _dbt_invoke(dbt_args: list, env: dict) -> None:
     """Run one dbt invocation locally (subprocess) or on Fabric compute (RemoteRunner).
 
@@ -257,9 +267,10 @@ def main() -> None:
                          "(default) picks remote for sf>=100 onelake runs — the sizes where "
                          "a GitHub runner grinds for hours — and local otherwise")
     ap.add_argument("--remote-cores", type=int,
-                    default=int(os.environ.get("TPCDI_REMOTE_CORES", "8")),
+                    default=int(os.environ.get("TPCDI_REMOTE_CORES", "0")),
                     help="vCores of the Fabric notebook for remote dbt (memory scales with "
-                         "it; 0 = workspace default). Default 8.")
+                         "it; Fabric sizes: 4/8/16/32/64). 0 (default) scales with --sf: "
+                         "8 at sf100, doubling per 10x (16 at sf1000, 32 at sf10000), cap 64.")
     args = ap.parse_args()
 
     staging = args.staging if str(args.staging).startswith("abfss://") \
@@ -280,7 +291,7 @@ def main() -> None:
     os.environ.update({k: env[k] for k in ("TPCDI_DIR", "DBT_SCHEMA", "WAREHOUSE_PATH")})
     REMOTE["on"] = args.remote == "remote" or (
         args.remote == "auto" and args.target == "onelake" and args.sf >= 100)
-    REMOTE["cores"] = args.remote_cores or None
+    REMOTE["cores"] = args.remote_cores or _auto_cores(args.sf)
     if REMOTE["on"]:
         if args.target != "onelake":
             sys.exit("ERROR: --remote remote needs --target onelake (an abfss:// warehouse)")
