@@ -52,9 +52,9 @@ JDK8_URL = ("https://api.adoptium.net/v3/binary/latest/8/ga/linux/x64/jdk/hotspo
 
 
 def auto_cores(sf: int) -> int:
-    """Same doubling-per-decade sizing as run.py's remote dbt: 8 vCores at sf100, 16 at
-    sf1000, 32 at sf10000, capped at Fabric's largest size 64 (valid sizes only)."""
-    return min(64, 8 * 2 ** int(math.log10(max(sf, 100) / 100)))
+    """Same sizing as run.py's remote dbt — doubling per HALF decade: 8 vCores at sf100,
+    16 from ~sf320, 32 at sf1000, 64 from ~sf3200 (Fabric's cap; valid sizes only)."""
+    return min(64, 8 * 2 ** int(2 * math.log10(max(sf, 100) / 100)))
 
 
 # Cell/notebook shapes copied from duckrun.fabric_remote — the metadata is load-bearing:

@@ -173,13 +173,13 @@ REMOTE = {"on": False, "cores": None}
 
 
 def _auto_cores(sf: int) -> int:
-    """Fabric notebook vCores scaled to the scale factor: 8 at sf100, doubling per 10x
-    (16 at sf1000, 32 at sf10000), capped at Fabric's largest size, 64. Memory scales
-    with vCores, and the warehouse (join/spill footprint) scales ~linearly with SF, so a
-    doubling per decade keeps big builds tractable without burning capacity on small ones.
-    Lands only on valid Fabric sizes (8/16/32/64)."""
+    """Fabric notebook vCores scaled to the scale factor: 8 at sf100, doubling per HALF
+    decade (16 from ~sf320, 32 at sf1000, 64 from ~sf3200), capped at Fabric's largest
+    size, 64. Memory scales with vCores and the warehouse (join/spill footprint) scales
+    ~linearly with SF; the half-decade step keeps a ~1 TB (sf1000) build brisk without
+    burning capacity on small ones. Lands only on valid Fabric sizes (8/16/32/64)."""
     import math
-    return min(64, 8 * 2 ** int(math.log10(max(sf, 100) / 100)))
+    return min(64, 8 * 2 ** int(2 * math.log10(max(sf, 100) / 100)))
 
 
 def _dbt_invoke(dbt_args: list, env: dict) -> None:
