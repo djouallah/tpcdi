@@ -105,50 +105,20 @@ jobs:
         # size limit, unlike duckrun's conn.copy (whole file into one ~4 GiB-capped DuckDB BLOB).
         run: pip install --quiet -r requirements.txt
 
-      - name: Azure login (OIDC federation — no client secret)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-
-      - name: Create the dedicated 'tpcdi' lakehouse (idempotent) + resolve its OneLake paths
+      # No azure/login and no token steps: duckrun mints its own tokens for BOTH planes via
+      # GitHub OIDC workload-identity federation (AZURE_CLIENT_ID/AZURE_TENANT_ID env +
+      # id-token: write) — control plane for the lakehouse API, storage plane for OneLake —
+      # and re-acquires near expiry, so long runs never outlive a static ~1h token.
+      - name: Ensure the 'tpcdi' lakehouse exists (duckrun, idempotent) + resolve OneLake paths
         run: |
           set -euo pipefail
-          BASE="https://api.fabric.microsoft.com/v1/workspaces/$WS_ID/lakehouses"
-          find_lh() {
-            az rest --method get --resource https://api.fabric.microsoft.com --url "$BASE" \
-              --query "value[?displayName=='$LH_NAME'].id | [0]" -o tsv 2>/dev/null
-          }
-          LH_ID="$(find_lh || true)"
-          if [ -z "${LH_ID:-}" ] || [ "$LH_ID" = "None" ]; then
-            echo "creating schema-enabled lakehouse '$LH_NAME' in workspace $WS_ID ..."
-            az rest --method post --resource https://api.fabric.microsoft.com --url "$BASE" \
-              --headers "Content-Type=application/json" \
-              --body '{"displayName":"'"$LH_NAME"'","creationPayload":{"enableSchemas":true}}' >/dev/null || true
-            for i in $(seq 1 12); do
-              sleep 5; LH_ID="$(find_lh || true)"
-              if [ -n "${LH_ID:-}" ] && [ "$LH_ID" != "None" ]; then break; fi
-              echo "  waiting for '$LH_NAME' to appear ($i/12)..."
-            done
-          else
-            echo "lakehouse '$LH_NAME' already exists ($LH_ID) — reusing."
-          fi
-          if [ -z "${LH_ID:-}" ] || [ "$LH_ID" = "None" ]; then
-            echo "lakehouse '$LH_NAME' was not visible after creation"; exit 1
-          fi
+          LH_ID=$(python -c "import duckrun; print(duckrun.workspace('$WS_ID').create_lakehouse('$LH_NAME'))")
           ROOT="abfss://$WS_ID@onelake.dfs.fabric.microsoft.com/$LH_ID"
           {
             echo "WAREHOUSE_PATH=$ROOT/Tables"
             echo "TPCDI_DIR=$ROOT/Files/tpcdi/sf${TPCDI_SF}"
           } >> "$GITHUB_ENV"
           echo "lakehouse '$LH_NAME' = $LH_ID"
-
-      - name: Acquire a fresh OneLake bearer token
-        run: |
-          TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
-          echo "::add-mask::$TOKEN"
-          echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
       # Generate + stream one PDGF table at a time to OneLake (mints a fresh token per table), so
       # local disk only ever holds a single table — any scale factor fits the runner. Resumable and
@@ -166,17 +136,10 @@ jobs:
       - name: dbt deps (install dbt_utils for the tests)
         run: dbt deps --project-dir singlepass
 
-      # A fresh token before the long dbt+audit phase (a big build can outlast the ~1h token).
-      - name: Re-acquire a fresh OneLake bearer token before dbt
-        run: |
-          TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
-          echo "::add-mask::$TOKEN"
-          echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
-
-      # A big SF can run for hours, past the token's ~1h life. The adapter refreshes mid-run via
-      # GitHub OIDC; on top of that, if an invocation still dies we re-mint and `dbt retry` —
-      # which RESUMES from the failed/skipped models, so progress accumulates across attempts.
-      - name: dbt run (full TPC-DI load — reads + writes OneLake; re-mints token + resumes on failure)
+      # A big SF can run for hours, past a token's ~1h life — the adapter self-mints and
+      # refreshes via GitHub OIDC. If an invocation still dies we `dbt retry` — which RESUMES
+      # from the failed/skipped models, so progress accumulates across attempts.
+      - name: dbt run (full TPC-DI load — reads + writes OneLake; resumes on failure)
         env:
           DBT_MAX_ATTEMPTS: '5'
         run: |
@@ -196,24 +159,12 @@ jobs:
             if [ "$attempt" -ge "$DBT_MAX_ATTEMPTS" ]; then
               echo "dbt still failing after $attempt attempt(s) (rc=$rc)"; exit $rc
             fi
-            echo "attempt $attempt failed (rc=$rc) — re-minting OneLake token and resuming with 'dbt retry'"
-            TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv 2>/dev/null)
-            if [ -n "$TOKEN" ]; then
-              echo "::add-mask::$TOKEN"; export ONELAKE_TOKEN="$TOKEN"; echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
-            else
-              echo "warning: az token refresh returned empty; relying on the adapter's own GH-OIDC refresh"
-            fi
+            echo "attempt $attempt failed (rc=$rc) — resuming with 'dbt retry' (adapter self-mints a fresh token)"
             cmd="retry"; attempt=$((attempt+1))
           done
 
       # Docs before the audit: the static dbt catalog reflects the LIVE OneLake Delta tables, so the
-      # page carries real row-count / byte / last-modified stats per model. Fresh token first (dbt may
-      # have run for hours).
-      - name: Re-acquire a fresh OneLake bearer token before docs
-        run: |
-          TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
-          echo "::add-mask::$TOKEN"
-          echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+      # page carries real row-count / byte / last-modified stats per model (adapter self-mints).
       - name: dbt docs generate (static — real catalog over the OneLake Delta tables)
         run: dbt docs generate --static --project-dir singlepass --profiles-dir singlepass
       - name: Verify the tpc-di catalog carries Delta table stats
@@ -227,12 +178,7 @@ jobs:
 
       # dbt-native transformation tests — the per-model correctness gate (uniqueness, referential
       # integrity, enum domains). Read-only over the OneLake Delta tables (delta_scan views); runs
-      # LAST, after the warehouse build and docs; a fresh token first (dbt may have run for hours).
-      - name: Re-acquire a fresh OneLake bearer token before dbt test
-        run: |
-          TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
-          echo "::add-mask::$TOKEN"
-          echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+      # LAST, after the warehouse build and docs (adapter self-mints a fresh token).
       - name: dbt test (validate transformations against the OneLake warehouse)
         run: dbt test --project-dir singlepass --profiles-dir singlepass
 

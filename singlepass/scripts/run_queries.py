@@ -121,10 +121,11 @@ def main():
 
     storage_options = None
     if args.warehouse.startswith("abfss://"):
+        # ONELAKE_TOKEN is an explicit override; otherwise duckrun self-acquires (and
+        # refreshes) its own OneLake token — env / GitHub OIDC / az CLI, in that order.
         token = os.environ.get("ONELAKE_TOKEN", "")
-        if not token:
-            sys.exit("ERROR: ONELAKE_TOKEN is empty — needed to query an abfss:// warehouse")
-        storage_options = {"bearer_token": token}
+        if token:
+            storage_options = {"bearer_token": token}
 
     files = sorted(glob.glob(os.path.join(args.queries, "*.sql")))
     if not files:

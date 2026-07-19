@@ -2,5 +2,7 @@
 # Pinned in one file so actions/setup-python can cache the wheels — a warm cache makes the
 # install near-instant, which also stops GitHub occasionally leaving the install step's
 # spinner stuck at "in_progress" in the UI (it drops the step-completion event on slow steps).
-duckrun[local]
+# >=0.3.27: workspace API (create_lakehouse / lakehouse_id) + self-acquired OneLake tokens —
+# the workflows create the lakehouse and authenticate with no azure/login or az CLI steps.
+duckrun[local]>=0.3.27
 obstore

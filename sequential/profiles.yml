@@ -8,5 +8,6 @@ tpcdi_seq:
       # next to tpcdi3) in the same lakehouse, so the identical table names never clash.
       schema: "{{ env_var('DBT_SCHEMA', 'tpcdi_seq') }}"
       root_path: "{{ env_var('WAREHOUSE_PATH', './warehouse') }}"
-      storage_options:
-        bearer_token: "{{ env_var('ONELAKE_TOKEN', '') }}"
+      # No storage_options: duckrun self-acquires the OneLake token (Fabric notebook →
+      # AZURE_STORAGE_TOKEN env → GitHub OIDC via AZURE_CLIENT_ID/AZURE_TENANT_ID → az CLI)
+      # and refreshes it near expiry — no static ~1h token to outlive on long builds.

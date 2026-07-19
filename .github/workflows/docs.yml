@@ -20,10 +20,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Build the static docs. Runs the Azure OIDC login OUTSIDE any GitHub environment, so the OIDC
-  # subject stays `repo:<owner>/<repo>:ref:refs/heads/main` — the one the Fabric federated
+  # Build the static docs. Runs OUTSIDE any GitHub environment, so duckrun's OIDC token minting
+  # presents the subject `repo:<owner>/<repo>:ref:refs/heads/main` — the one the Fabric federated
   # credential trusts. (A job bound to the `github-pages` environment would present a different
-  # subject and fail the OneLake login — that's why deploy is a separate job below.)
+  # subject and fail the OneLake auth — that's why deploy is a separate job below.)
   build:
     runs-on: ubuntu-latest
     permissions:
@@ -47,26 +47,16 @@ jobs:
       - name: Install duckrun (pulls dbt-duckdb + duckdb + deltalake)
         run: pip install --quiet -r requirements.txt
 
-      - name: Azure login (OIDC federation — no client secret)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-
-      - name: Resolve the 'tpcdi' lakehouse + a fresh OneLake token
+      # No azure/login and no token steps: duckrun mints its own tokens via GitHub OIDC
+      # workload-identity federation (AZURE_CLIENT_ID/AZURE_TENANT_ID env + id-token: write)
+      # for both the lakehouse lookup and the OneLake reads, refreshing near expiry.
+      - name: Resolve the existing 'tpcdi' lakehouse (find-only — never creates)
         run: |
           set -euo pipefail
-          BASE="https://api.fabric.microsoft.com/v1/workspaces/$WS_ID/lakehouses"
-          LH_ID="$(az rest --method get --resource https://api.fabric.microsoft.com --url "$BASE" \
-            --query "value[?displayName=='$LH_NAME'].id | [0]" -o tsv 2>/dev/null || true)"
-          if [ -z "${LH_ID:-}" ] || [ "$LH_ID" = "None" ]; then
-            echo "lakehouse '$LH_NAME' not found in workspace $WS_ID — run the ETL workflow first"; exit 1
-          fi
+          LH_ID=$(python -c "import duckrun; print(duckrun.workspace('$WS_ID').lakehouse_id('$LH_NAME'))") \
+            || { echo "lakehouse '$LH_NAME' not found in workspace $WS_ID — run the ETL workflow first"; exit 1; }
           echo "WAREHOUSE_PATH=abfss://$WS_ID@onelake.dfs.fabric.microsoft.com/$LH_ID/Tables" >> "$GITHUB_ENV"
-          TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
-          echo "::add-mask::$TOKEN"
-          echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          echo "lakehouse '$LH_NAME' = $LH_ID"
 
       - name: dbt docs generate (static — real catalog over the OneLake Delta tables)
         run: |

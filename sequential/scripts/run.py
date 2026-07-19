@@ -113,10 +113,11 @@ def connect(warehouse: str, schema: str):
     scripts/run_queries.py."""
     storage_options = None
     if warehouse.startswith("abfss://"):
+        # ONELAKE_TOKEN is an explicit override; otherwise duckrun self-acquires (and
+        # refreshes) its own OneLake token — env / GitHub OIDC / az CLI, in that order.
         token = os.environ.get("ONELAKE_TOKEN", "")
-        if not token:
-            sys.exit("ERROR: ONELAKE_TOKEN is empty — needed to write an abfss:// warehouse")
-        storage_options = {"bearer_token": token}
+        if token:
+            storage_options = {"bearer_token": token}
     # duckrun opens read-only by default; the orchestrator writes Audit/DImessages via DML.
     return duckrun.connect(
         warehouse, storage_options=storage_options, schema=schema, read_only=False)

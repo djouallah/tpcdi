@@ -33,16 +33,15 @@ def main():
     args = ap.parse_args()
 
     warehouse = os.environ.get("WAREHOUSE_PATH", "")
-    token = os.environ.get("ONELAKE_TOKEN", "")
     if not warehouse.startswith("abfss://"):
         sys.exit("ERROR: WAREHOUSE_PATH must be an abfss:// OneLake Tables path")
-    if not token:
-        sys.exit("ERROR: ONELAKE_TOKEN is empty — mint one before uploading")
     if not os.path.isdir(os.path.join(args.staging, "Batch1")):
         sys.exit(f"ERROR: {args.staging}/Batch1 not found — run generate_data.py first")
 
+    # ONELAKE_TOKEN is an explicit override; otherwise duckrun self-acquires its own token.
+    token = os.environ.get("ONELAKE_TOKEN", "")
     conn = duckrun.connect(
-        warehouse, storage_options={"bearer_token": token}, read_only=False)
+        warehouse, storage_options={"bearer_token": token} if token else None, read_only=False)
     # overwrite=True so a re-prime refreshes the seed rather than skipping existing files.
     ok = conn.copy(args.staging, args.prefix, overwrite=True)
     if not ok:

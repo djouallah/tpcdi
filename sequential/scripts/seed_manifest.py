@@ -36,11 +36,10 @@ def _files_store_root(warehouse: str) -> str:
 
 
 def mint_token() -> str:
-    """A FRESH OneLake storage token (GitHub OIDC → ONELAKE_TOKEN env fallback)."""
+    """A FRESH OneLake storage token (GitHub OIDC → ONELAKE_TOKEN env → duckrun self-acquire,
+    which falls through Fabric notebook / env / azure-identity incl. az CLI)."""
     token = auth.refresh_storage_token() or os.environ.get("ONELAKE_TOKEN", "")
-    if not token:
-        sys.exit("ERROR: could not mint a OneLake token (need AZURE_CLIENT_ID/TENANT_ID or ONELAKE_TOKEN)")
-    return token
+    return token or auth.get_onelake_token()
 
 
 def connect(warehouse: str, token: str | None = None):

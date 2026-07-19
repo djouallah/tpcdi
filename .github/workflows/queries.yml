@@ -60,31 +60,16 @@ jobs:
       - name: Install duckrun (pulls duckdb + deltalake)
         run: pip install --quiet -r requirements.txt
 
-      - name: Azure login (OIDC federation — no client secret)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-
+      # No azure/login and no token steps: duckrun mints its own tokens via GitHub OIDC
+      # workload-identity federation (AZURE_CLIENT_ID/AZURE_TENANT_ID env + id-token: write)
+      # for both the lakehouse lookup and the OneLake reads, refreshing near expiry.
       - name: Resolve the existing 'tpcdi' lakehouse (find-only — never creates or writes)
         run: |
           set -euo pipefail
-          BASE="https://api.fabric.microsoft.com/v1/workspaces/$WS_ID/lakehouses"
-          LH_ID="$(az rest --method get --resource https://api.fabric.microsoft.com --url "$BASE" \
-            --query "value[?displayName=='$LH_NAME'].id | [0]" -o tsv 2>/dev/null || true)"
-          if [ -z "${LH_ID:-}" ] || [ "$LH_ID" = "None" ]; then
-            echo "lakehouse '$LH_NAME' not found in workspace $WS_ID — run the ETL workflow (tpc_di.yml) first"
-            exit 1
-          fi
+          LH_ID=$(python -c "import duckrun; print(duckrun.workspace('$WS_ID').lakehouse_id('$LH_NAME'))") \
+            || { echo "lakehouse '$LH_NAME' not found in workspace $WS_ID — run the ETL workflow (tpc_di.yml) first"; exit 1; }
           echo "WAREHOUSE_PATH=abfss://$WS_ID@onelake.dfs.fabric.microsoft.com/$LH_ID/Tables" >> "$GITHUB_ENV"
           echo "lakehouse '$LH_NAME' = $LH_ID"
-
-      - name: Acquire a fresh OneLake bearer token
-        run: |
-          TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
-          echo "::add-mask::$TOKEN"
-          echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
       - name: Run the analytical queries (read-only)
         run: python ./singlepass/scripts/run_queries.py --warehouse "$WAREHOUSE_PATH" --schema "$DBT_SCHEMA" --queries singlepass/queries
