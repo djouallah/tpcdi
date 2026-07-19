@@ -49,6 +49,7 @@ import duckrun
 # generate_data (PDGF driver) lives beside this script.
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import fix_audit_key  # noqa: E402
 import generate_data as gd  # noqa: E402
 import seed_manifest as sm  # noqa: E402
 
@@ -155,6 +156,10 @@ def main():
             gd._run_digen(datagen, args.sf, staging, tables=[tbl])
             if tbl == "CustomerMgmt":
                 gd._split_customermgmt(os.path.join(staging, "Batch1"), chunk)
+            if tbl == "Customer":
+                # PDGF's hard-coded audit config emits phantom DOB alert counts the data can't
+                # reproduce (djouallah/tpcdi#1) — repair the key from the data before upload.
+                fix_audit_key.repair_seed_root(staging)
             files = _staged_files(staging)
             _upload(args.warehouse, staging, args.prefix, present)
             if onelake:

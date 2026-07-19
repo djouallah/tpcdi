@@ -273,6 +273,10 @@ def main():
     _run_digen(datagen, args.sf, args.out)
     _split_customermgmt(os.path.join(args.out, "Batch1"),
                         int(os.environ.get("TPCDI_CM_CHUNK", "20000")))
+    # PDGF's hard-coded audit config emits phantom DOB alert counts the data can't
+    # reproduce (djouallah/tpcdi#1) — repair the key from the data.
+    import fix_audit_key
+    fix_audit_key.repair_seed_root(args.out)
     _summarize(args.out)
     print("  done.", flush=True)
 
