@@ -43,10 +43,26 @@ def main() -> None:
     ap.add_argument("--warehouse", default=os.environ.get("WAREHOUSE_PATH"),
                     help="root_path of the Delta warehouse (local dir or abfss://.../Tables)")
     ap.add_argument("--schema", default=os.environ.get("DBT_SCHEMA", "tpcdi_seq"))
+    ap.add_argument("--remote", choices=["auto", "local", "remote"],
+                    default=os.environ.get("TPCDI_REMOTE", "auto"),
+                    help="where the audit executes: 'remote' = on Fabric compute (the "
+                         "heaviest check spills ~79 GiB at sf100, past the runner's disk); "
+                         "'auto' (default) goes remote for sf >= 100 OneLake warehouses "
+                         "(sf from TPCDI_SF), else local. The audit SQL is identical "
+                         "either way — only the hardware changes.")
     args = ap.parse_args()
 
     if not args.warehouse:
         sys.exit("ERROR: set --warehouse or WAREHOUSE_PATH (local dir or abfss://.../Tables)")
+
+    sf = int(os.environ.get("TPCDI_SF", "3"))
+    if args.remote == "remote" or (
+            args.remote == "auto" and str(args.warehouse).startswith("abfss://") and sf >= 100):
+        # Re-enter this script on Fabric compute (--remote local); same SQL, bigger box.
+        sys.path.insert(0, os.path.join(PROJ, "scripts"))
+        import remote_seed
+        remote_seed.launch_audit(sf, args.schema, args.warehouse)
+        return
 
     storage_options = None
     if args.warehouse.startswith("abfss://"):
