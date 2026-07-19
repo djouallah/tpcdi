@@ -196,27 +196,57 @@ def launch_task(name: str, cfg: dict, cores: int) -> None:
         print(f">> deploying {name} to workspace {ws_guid} "
               f"(vCores={cores}, repo@{cfg['ref']})", flush=True)
         ws.deploy(path, overwrite=True)
-    print(f">> running {name} on Fabric compute (kept after the run — see the Fabric UI "
-          "for live output) ...", flush=True)
-    job_err = None
-    try:
-        status = ws.run(name)
-        print(f">> remote job state: {status}", flush=True)
-    except Exception as exc:  # noqa: BLE001 — read the result log back even on a failed job
-        job_err = exc
+    # Clear any prior run's result FIRST, so whatever we read back afterwards is this run's
+    # verdict, never a stale ok:true from an earlier launch of the same task.
+    _delete_result(warehouse, cfg["result"])
 
-    res = _read_result(warehouse, cfg["result"])
-    if res is not None:
-        print(">> ---- remote log " + "-" * 60, flush=True)
-        print(res.get("log", "").rstrip(), flush=True)
-        print(">> ---- end remote log " + "-" * 56, flush=True)
-    if res is not None and res.get("ok"):
-        print(f">> remote {cfg['label']} SUCCEEDED", flush=True)
-        return
-    if job_err is not None and res is None:
-        raise job_err
-    sys.exit(f">> remote {cfg['label']} FAILED — see the remote log above"
-             + (f" (job error: {job_err})" if job_err else ""))
+    # A job that fails WITHOUT writing the result JSON never ran our code — a session-level
+    # failure (typically transient capacity contention: another Fabric job holding the
+    # vCores). Those get one delayed retry. A job that wrote {ok: false} really ran and
+    # really failed — never retried.
+    import time
+    for attempt in (1, 2):
+        print(f">> running {name} on Fabric compute (attempt {attempt}/2; kept after the "
+              "run — see the Fabric UI for live output) ...", flush=True)
+        job_err = None
+        try:
+            status = ws.run(name)
+            print(f">> remote job state: {status}", flush=True)
+        except Exception as exc:  # noqa: BLE001 — read the result log back even on a failed job
+            job_err = exc
+
+        res = _read_result(warehouse, cfg["result"])
+        if res is not None:
+            print(">> ---- remote log " + "-" * 60, flush=True)
+            print(res.get("log", "").rstrip(), flush=True)
+            print(">> ---- end remote log " + "-" * 56, flush=True)
+            if res.get("ok"):
+                print(f">> remote {cfg['label']} SUCCEEDED", flush=True)
+                return
+            sys.exit(f">> remote {cfg['label']} FAILED — see the remote log above")
+        if attempt == 1:
+            print(f">> job died before the task ran ({job_err}) — likely transient capacity "
+                  "contention; retrying in 120s", flush=True)
+            time.sleep(120)
+    raise job_err
+
+
+def _delete_result(warehouse: str, result_obj: str) -> None:
+    """DFS-delete the result object (404 = fine) — obstore.delete is OneLake-broken."""
+    import urllib.error
+    import urllib.request
+
+    from duckrun import auth
+    ws_name, host, lh = re.match(r"abfss://([^@]+)@([^/]+)/([^/]+)/Tables$",
+                                 warehouse.rstrip("/")).groups()
+    req = urllib.request.Request(f"https://{host}/{ws_name}/{lh}/{result_obj}",
+                                 method="DELETE",
+                                 headers={"Authorization": f"Bearer {auth.get_onelake_token()}"})
+    try:
+        urllib.request.urlopen(req)
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
 
 
 def _read_result(warehouse: str, result_obj: str):
