@@ -4,5 +4,8 @@
 # spinner stuck at "in_progress" in the UI (it drops the step-completion event on slow steps).
 # >=0.3.27: workspace API (create_lakehouse / lakehouse_id) + self-acquired OneLake tokens —
 # the workflows create the lakehouse and authenticate with no azure/login or az CLI steps.
-duckrun[local]>=0.3.27
+# TEMPORARY git pin: remote-job polling died at ~1h (token expiry + hard poll cap), killing
+# healthy multi-hour sf1000 dbt batches — pinned to the fix branch until duckrun#11 is
+# released to PyPI, then revert to duckrun[local]>=0.4.25.
+duckrun[local] @ git+https://github.com/djouallah/duckrun.git@fix/remote-poll-token-and-timeout
 obstore
