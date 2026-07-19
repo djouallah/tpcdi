@@ -22,8 +22,10 @@ duckrun's capture pattern: the whole work cell is wrapped, every step's output i
 (live notebook snapshot + buffer), and a result JSON ``{ok, log}`` is written to OneLake
 Files LAST, cleanly, whatever happened — the launcher reads it back (even off a failed job),
 prints the remote log, and decides success from the JSON, not the Fabric job state.
-Notebooks are KEPT after the run (``tpcdi_seed_sf<N>`` / ``tpcdi_audit_sf<N>``) so their
-output stays inspectable in the Fabric UI; the next launch overwrites them.
+Notebooks (``tpcdi_seed_sf<N>`` / ``tpcdi_audit_sf<N>``) are DELETED after any run that
+produced a result JSON — the log has already been read back, so nothing lingers in the
+workspace. Only a session that died before the task ran keeps its notebook (its snapshot is
+the sole forensic evidence); the next launch overwrites it.
 
 Used by ``stream_seed.py --remote auto`` (seed, remote for sf > 370) and
 ``tools/run_sequential_audit.py --remote auto`` (audit, remote for sf >= 100); direct use:
@@ -195,7 +197,7 @@ def launch_task(name: str, cfg: dict, cores: int) -> None:
         ws = duckrun.workspace(ws_guid)
         print(f">> deploying {name} to workspace {ws_guid} "
               f"(vCores={cores}, repo@{cfg['ref']})", flush=True)
-        ws.deploy(path, overwrite=True)
+        item_id = ws.deploy(path, overwrite=True)
     # Clear any prior run's result FIRST, so whatever we read back afterwards is this run's
     # verdict, never a stale ok:true from an earlier launch of the same task.
     _delete_result(warehouse, cfg["result"])
@@ -220,6 +222,8 @@ def launch_task(name: str, cfg: dict, cores: int) -> None:
             print(">> ---- remote log " + "-" * 60, flush=True)
             print(res.get("log", "").rstrip(), flush=True)
             print(">> ---- end remote log " + "-" * 56, flush=True)
+            # The full log is preserved above — the notebook has served its purpose.
+            _delete_notebook(ws_guid, item_id, name)
             if res.get("ok"):
                 print(f">> remote {cfg['label']} SUCCEEDED", flush=True)
                 return
@@ -228,7 +232,26 @@ def launch_task(name: str, cfg: dict, cores: int) -> None:
             print(f">> job died before the task ran ({job_err}) — likely transient capacity "
                   "contention; retrying in 120s", flush=True)
             time.sleep(120)
+    # Session died before our code ran on both attempts — KEEP the notebook: its snapshot is
+    # the only forensic evidence there is.
+    print(f">> notebook {name} kept in the workspace for diagnosis", flush=True)
     raise job_err
+
+
+def _delete_notebook(ws_guid: str, item_id: str, name: str) -> None:
+    """Best-effort DELETE of the run notebook — the workspace stays clean; the run's log has
+    already been printed from the result JSON."""
+    import urllib.request
+
+    from duckrun import auth
+    req = urllib.request.Request(
+        f"https://api.fabric.microsoft.com/v1/workspaces/{ws_guid}/items/{item_id}",
+        method="DELETE", headers={"Authorization": f"Bearer {auth.get_fabric_token()}"})
+    try:
+        urllib.request.urlopen(req)
+        print(f">> notebook {name} deleted from the workspace", flush=True)
+    except Exception as exc:  # noqa: BLE001 — a leftover notebook is cosmetic, never fatal
+        print(f">> (could not delete notebook {name}: {exc})", flush=True)
 
 
 def _delete_result(warehouse: str, result_obj: str) -> None:
