@@ -77,19 +77,40 @@ def _notebook(cells: list) -> dict:
     }
 
 
+def result_object(prefix: str) -> str:
+    """Object path (under the lakehouse root) of the run's result JSON — written by the
+    notebook, read back by the launcher. Lives beside the seed it belongs to."""
+    return f"Files/{prefix.strip('/')}/_remote_seed_result.json"
+
+
 def build_seed_notebook(sf: int, prefix: str, warehouse: str, ref: str, cores: int,
                         jvm_xmx: str, gen_timeout: str) -> dict:
     """The generation notebook: JDK 8 + repo download + stream_seed, all under the ~135 GiB
-    /home/trusted-service-user/work disk (the container's / and /tmp are a cramped overlay)."""
+    /home/trusted-service-user/work disk (the container's / and /tmp are a cramped overlay).
+
+    duckrun's capture pattern: the whole body is wrapped so ANY failure lands, with its
+    traceback and the full streamed log, in a small result JSON on OneLake Files — and the
+    cell exits cleanly either way (an uncaught cell exception cancels the session and leaves
+    nothing to diagnose from). The launcher reads the JSON back and decides success from it,
+    not from the Fabric job state. The subprocess's output is tee'd: live into the notebook
+    snapshot AND into the result log.
+
+    The kernel (where notebookutils definitely works) mints a storage token and exports it as
+    ONELAKE_TOKEN for the stream_seed subprocess — its own per-table refresh_storage_token()
+    stays first in line, so the env token is only the fallback if notebookutils doesn't reach
+    into subprocesses."""
     cfg = {"sf": sf, "prefix": prefix, "warehouse": warehouse, "ref": ref,
            "project": PROJECT, "jvm_xmx": jvm_xmx, "gen_timeout": gen_timeout,
-           "repo_url": REPO_TARBALL.format(ref=ref), "jdk_url": JDK8_URL}
+           "repo_url": REPO_TARBALL.format(ref=ref), "jdk_url": JDK8_URL,
+           "result": result_object(prefix)}
     work = f"""\
-import glob, os, shutil, subprocess, sys, tarfile, urllib.request
+import glob, io, json, os, re, shutil, subprocess, sys, tarfile, traceback, urllib.request
 CFG = {json.dumps(cfg)}
-WORK = '/home/trusted-service-user/work/tpcdi_seed'
-os.makedirs(WORK, exist_ok=True)
-os.chdir(WORK)
+LOG = io.StringIO()
+
+def say(msg):
+    print(msg, flush=True)
+    LOG.write(msg + '\\n')
 
 def untar(src, dst):
     with tarfile.open(src) as t:
@@ -98,33 +119,72 @@ def untar(src, dst):
         except TypeError:
             t.extractall(dst)
 
-subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'duckrun', 'obstore'], check=True)
+def run_tee(cmd, env=None):
+    say('$ ' + ' '.join(cmd))
+    p = subprocess.Popen(cmd, env=env, text=True, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT)
+    for line in p.stdout:
+        say(line.rstrip('\\n'))
+    if p.wait() != 0:
+        raise RuntimeError('command failed (exit %s): %s' % (p.returncode, cmd))
 
-if not glob.glob('jdk/*/bin/java'):
-    print('downloading portable JDK 8 (Adoptium) ...', flush=True)
-    urllib.request.urlretrieve(CFG['jdk_url'], 'jdk8.tgz')
-    untar('jdk8.tgz', 'jdk')
-    os.remove('jdk8.tgz')
-os.environ['PATH'] = os.path.abspath(glob.glob('jdk/*/bin')[0]) + os.pathsep + os.environ['PATH']
-subprocess.run(['java', '-version'], check=True)
+ok = False
+try:
+    WORK = '/home/trusted-service-user/work/tpcdi_seed'
+    os.makedirs(WORK, exist_ok=True)
+    os.chdir(WORK)
+    run_tee([sys.executable, '-m', 'pip', 'install', '-q', 'duckrun', 'obstore'])
 
-print('fetching djouallah/tpcdi @ ' + CFG['ref'], flush=True)
-urllib.request.urlretrieve(CFG['repo_url'], 'repo.tgz')
-shutil.rmtree('repo', ignore_errors=True)
-untar('repo.tgz', 'repo')
-os.remove('repo.tgz')
-stream = glob.glob('repo/*/' + CFG['project'] + '/scripts/stream_seed.py')[0]
+    if not glob.glob('jdk/*/bin/java'):
+        say('downloading portable JDK 8 (Adoptium) ...')
+        urllib.request.urlretrieve(CFG['jdk_url'], 'jdk8.tgz')
+        untar('jdk8.tgz', 'jdk')
+        os.remove('jdk8.tgz')
+    os.environ['PATH'] = os.path.abspath(glob.glob('jdk/*/bin')[0]) + os.pathsep + os.environ['PATH']
+    run_tee(['java', '-version'])
 
-env = dict(os.environ)
-env.update({{'WAREHOUSE_PATH': CFG['warehouse'],
-             'TPCDI_STAGING': WORK + '/staging',
-             'TPCDI_WORK': WORK + '/work',
-             'TPCDI_JVM_XMX': CFG['jvm_xmx'],
-             'TPCDI_GEN_TIMEOUT': CFG['gen_timeout']}})
-print('generating seed sf%s -> Files/%s' % (CFG['sf'], CFG['prefix']), flush=True)
-subprocess.run([sys.executable, stream, '--sf', str(CFG['sf']), '--prefix', CFG['prefix'],
-                '--warehouse', CFG['warehouse'], '--remote', 'local'], check=True, env=env)
-print('SEED COMPLETE', flush=True)
+    say('fetching djouallah/tpcdi @ ' + CFG['ref'])
+    urllib.request.urlretrieve(CFG['repo_url'], 'repo.tgz')
+    shutil.rmtree('repo', ignore_errors=True)
+    untar('repo.tgz', 'repo')
+    os.remove('repo.tgz')
+    stream = glob.glob('repo/*/' + CFG['project'] + '/scripts/stream_seed.py')[0]
+
+    import notebookutils
+    env = dict(os.environ)
+    env.update({{'WAREHOUSE_PATH': CFG['warehouse'],
+                 'TPCDI_STAGING': WORK + '/staging',
+                 'TPCDI_WORK': WORK + '/work',
+                 'TPCDI_JVM_XMX': CFG['jvm_xmx'],
+                 'TPCDI_GEN_TIMEOUT': CFG['gen_timeout'],
+                 'ONELAKE_TOKEN': notebookutils.credentials.getToken('storage')}})
+    say('generating seed sf%s -> Files/%s' % (CFG['sf'], CFG['prefix']))
+    run_tee([sys.executable, stream, '--sf', str(CFG['sf']), '--prefix', CFG['prefix'],
+             '--warehouse', CFG['warehouse'], '--remote', 'local'], env=env)
+    ok = True
+    say('SEED COMPLETE')
+except BaseException:
+    LOG.write(traceback.format_exc())
+    print(traceback.format_exc(), flush=True)
+
+# Result JSON to OneLake Files — written LAST, cleanly, whatever happened above.
+# (DFS DELETE first: OneLake 409s a PUT onto an existing blob, and obstore.delete uses a
+# bulk-batch API OneLake rejects — same dance as seed_manifest.delete_object.)
+from obstore.store import AzureStore
+import notebookutils, obstore
+tok = notebookutils.credentials.getToken('storage')
+ws_name, host, lh = re.match(r'abfss://([^@]+)@([^/]+)/([^/]+)/Tables$',
+                             CFG['warehouse'].rstrip('/')).groups()
+req = urllib.request.Request('https://%s/%s/%s/%s' % (host, ws_name, lh, CFG['result']),
+                             method='DELETE', headers={{'Authorization': 'Bearer ' + tok}})
+try:
+    urllib.request.urlopen(req)
+except Exception:
+    pass
+store = AzureStore.from_url('abfss://%s@%s/%s/' % (ws_name, host, lh), bearer_token=tok)
+body = json.dumps({{'ok': ok, 'sf': CFG['sf'], 'log': LOG.getvalue()[-200000:]}}).encode()
+obstore.put(store, CFG['result'], body)
+print('result written: ' + CFG['result'], flush=True)
 """
     cells = [_code_cell("%%configure -f\n" + json.dumps({"vCores": int(cores)})),
              _code_cell(work)]
@@ -157,8 +217,41 @@ def launch(sf: int, prefix: str, warehouse: str, cores: int = 0, ref: str = "") 
         ws.deploy(path, overwrite=True)
     print(f">> running {name} on Fabric compute (kept after the run — see the Fabric UI "
           "for live output) ...", flush=True)
-    status = ws.run(name)
-    print(f">> remote seed generation finished: {status}", flush=True)
+    job_err = None
+    try:
+        status = ws.run(name)
+        print(f">> remote job state: {status}", flush=True)
+    except Exception as exc:  # noqa: BLE001 — read the result log back even on a failed job
+        job_err = exc
+
+    res = _read_result(warehouse, prefix)
+    if res is not None:
+        print(">> ---- remote log " + "-" * 60, flush=True)
+        print(res.get("log", "").rstrip(), flush=True)
+        print(">> ---- end remote log " + "-" * 56, flush=True)
+    if res is not None and res.get("ok"):
+        print(">> remote seed generation SUCCEEDED", flush=True)
+        return
+    if job_err is not None and res is None:
+        raise job_err
+    sys.exit(">> remote seed generation FAILED — see the remote log above"
+             + (f" (job error: {job_err})" if job_err else ""))
+
+
+def _read_result(warehouse: str, prefix: str):
+    """The notebook's result JSON from OneLake Files, or None if it never got written."""
+    import obstore
+    from obstore.store import AzureStore
+
+    from duckrun import auth
+    ws_name, host, lh = re.match(r"abfss://([^@]+)@([^/]+)/([^/]+)/Tables$",
+                                 warehouse.rstrip("/")).groups()
+    store = AzureStore.from_url(f"abfss://{ws_name}@{host}/{lh}/",
+                                bearer_token=auth.get_onelake_token())
+    try:
+        return json.loads(bytes(obstore.get(store, result_object(prefix)).bytes()))
+    except Exception:  # noqa: BLE001 — absent = notebook died before writing it
+        return None
 
 
 def main():
