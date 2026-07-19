@@ -26,7 +26,14 @@ mutually exclusive per run; keep them in separate schemas (e.g. ``tpcdi3`` vs
 are ``CREATE OR REPLACE``-d at init — no folder deletion, so it is OneLake-safe.
 
 Reuses the same duckrun connection/env handling as the single-pass runner
-(``WAREHOUSE_PATH``, ``ONELAKE_TOKEN``, ``DBT_SCHEMA``).
+(``WAREHOUSE_PATH``, ``DBT_SCHEMA``; tokens are self-acquired by duckrun, with
+``ONELAKE_TOKEN`` as an optional override).
+
+Where dbt executes: ``--remote auto`` (default) runs the dbt phases on **Fabric compute**
+for sf>=100 onelake runs — duckrun's RemoteRunner ships the project to a throwaway Fabric
+Python notebook (``--remote-cores`` vCores, memory scales with it), data-local to OneLake,
+instead of grinding for hours on a small CI runner — and locally otherwise. The between-batch
+SQL checkpoints, Audit refresh, and the Appendix-A audit still run here.
 
 Local::
 
@@ -158,23 +165,52 @@ def run_sql_file(conn, name: str, subs: dict) -> int:
     return n
 
 
+# Where dbt executes. Local = the classic `dbt` subprocess on this machine. Remote = duckrun's
+# RemoteRunner ships the project to a throwaway Fabric Python notebook and runs it there —
+# data-local to OneLake and with real vCores/memory, which is what makes sf100+ tractable
+# (a 3-batch sf100 load grinds for hours on a 4-vCPU GitHub runner). Set by main().
+REMOTE = {"on": False, "cores": None}
+
+
+def _dbt_invoke(dbt_args: list, env: dict) -> None:
+    """Run one dbt invocation locally (subprocess) or on Fabric compute (RemoteRunner).
+
+    RemoteRunner is a drop-in for dbtRunner: same args list, project zipped and shipped from
+    --project-dir. The zip deliberately excludes dbt_packages, so `dbt deps` is batched into
+    the SAME throwaway notebook (the `with` form) ahead of the real command. The remote
+    notebook self-acquires its own OneLake token via notebookutils, so no token is forwarded;
+    only the project env vars the profile/models render are."""
+    if not REMOTE["on"]:
+        subprocess.run(["dbt"] + dbt_args, check=True, env=env)
+        return
+    from duckrun import RemoteRunner
+    remote_env = {k: env[k] for k in ("WAREHOUSE_PATH", "DBT_SCHEMA", "TPCDI_DIR", "TPCDI_SF")
+                  if env.get(k)}
+    proj = ["--project-dir", SEQ_PROJ, "--profiles-dir", SEQ_PROJ]
+    with RemoteRunner(cores=REMOTE["cores"], env=remote_env) as dbt:
+        dbt.invoke(["deps"] + proj)
+        res = dbt.invoke(dbt_args)
+    if not res.success:
+        failed = [r for r in (res.result or []) if str(r.get("status")) not in ("success", "pass")]
+        sys.exit(f"ERROR: remote dbt {dbt_args[0]} failed on Fabric compute"
+                 + (f" — {failed[:5]}" if failed else ""))
+
+
 def dbt_run(batch: int, env: dict) -> None:
     # Batch 1 = --full-refresh over the whole sequential project (references + the
     # historical branch of every incremental model). Batches 2-3 select only the
     # bronze + dim/fact models (tag:incremental); the reference models are batch-1 static.
-    cmd = ["dbt", "run", "--project-dir", SEQ_PROJ, "--profiles-dir", SEQ_PROJ,
+    cmd = ["run", "--project-dir", SEQ_PROJ, "--profiles-dir", SEQ_PROJ,
            "--vars", f"{{batch: {batch}}}"]
     if batch == 1:
         cmd.append("--full-refresh")
     else:
         cmd += ["--select", "tag:incremental"]
-    subprocess.run(cmd, check=True, env=env)
+    _dbt_invoke(cmd, env)
 
 
 def dbt_test(env: dict) -> None:
-    subprocess.run(
-        ["dbt", "test", "--project-dir", SEQ_PROJ, "--profiles-dir", SEQ_PROJ],
-        check=True, env=env)
+    _dbt_invoke(["test", "--project-dir", SEQ_PROJ, "--profiles-dir", SEQ_PROJ], env)
 
 
 def warehouse_built(conn) -> bool:
@@ -214,6 +250,16 @@ def main() -> None:
                          "Phase Complete Record is in DImessages) the load + dbt test are "
                          "SKIPPED and the existing warehouse is reused — so re-running only "
                          "re-audits, without a ~15-min rebuild.")
+    ap.add_argument("--remote", choices=["auto", "local", "remote"],
+                    default=os.environ.get("TPCDI_REMOTE", "auto"),
+                    help="where dbt executes: 'remote' = on Fabric compute via duckrun's "
+                         "RemoteRunner (throwaway notebook, data-local to OneLake); 'auto' "
+                         "(default) picks remote for sf>=100 onelake runs — the sizes where "
+                         "a GitHub runner grinds for hours — and local otherwise")
+    ap.add_argument("--remote-cores", type=int,
+                    default=int(os.environ.get("TPCDI_REMOTE_CORES", "8")),
+                    help="vCores of the Fabric notebook for remote dbt (memory scales with "
+                         "it; 0 = workspace default). Default 8.")
     args = ap.parse_args()
 
     staging = args.staging if str(args.staging).startswith("abfss://") \
@@ -227,6 +273,19 @@ def main() -> None:
     elif not env.get("WAREHOUSE_PATH"):
         sys.exit("ERROR: --target onelake needs WAREHOUSE_PATH (abfss://.../Tables)")
     warehouse = env["WAREHOUSE_PATH"]
+
+    # Remote dbt (Fabric compute). RemoteRunner derives the workspace/lakehouse from the
+    # profile's rendered root_path, which reads WAREHOUSE_PATH from *this* process's env —
+    # so mirror the computed overrides into os.environ (harmless for the local path too).
+    os.environ.update({k: env[k] for k in ("TPCDI_DIR", "DBT_SCHEMA", "WAREHOUSE_PATH")})
+    REMOTE["on"] = args.remote == "remote" or (
+        args.remote == "auto" and args.target == "onelake" and args.sf >= 100)
+    REMOTE["cores"] = args.remote_cores or None
+    if REMOTE["on"]:
+        if args.target != "onelake":
+            sys.exit("ERROR: --remote remote needs --target onelake (an abfss:// warehouse)")
+        print(f">> dbt executes REMOTELY on Fabric compute "
+              f"(vCores={REMOTE['cores'] or 'workspace default'})", flush=True)
 
     if not args.skip_generate:
         gen = [sys.executable, os.path.join(HERE, "generate_data.py"),

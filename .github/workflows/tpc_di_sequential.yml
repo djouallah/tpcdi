@@ -47,6 +47,14 @@ on:
         description: "Force a full warehouse rebuild (else reuse an already-built warehouse and only re-audit)"
         type: boolean
         default: false
+      remote:
+        # 'auto' runs the dbt phases on Fabric compute (duckrun RemoteRunner, data-local to
+        # OneLake) for sf>=100 — the sizes where the 4-vCPU runner grinds for hours — and
+        # locally below that. Override to force either side.
+        description: "Where dbt executes (auto = Fabric compute for sf>=100, runner otherwise)"
+        type: choice
+        options: ["auto", "local", "remote"]
+        default: "auto"
 
 permissions:
   contents: read
@@ -74,6 +82,8 @@ jobs:
       LH_NAME: tpcdi
       # Sequential warehouse schema — sibling of the single-pass tpcdi<SF>.
       DBT_SCHEMA: tpcdi${{ inputs.scale_factor || vars.TPCDI_SF || '10' }}_seq
+      # Where run.py executes dbt: auto = Fabric compute (RemoteRunner) for sf>=100.
+      TPCDI_REMOTE: ${{ inputs.remote || 'auto' }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_TRANSPORT_OPTION_TYPE: curl
