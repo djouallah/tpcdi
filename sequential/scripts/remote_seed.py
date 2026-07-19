@@ -119,6 +119,12 @@ def untar(src, dst):
         except TypeError:
             t.extractall(dst)
 
+def fetch(url, dst):
+    # urlretrieve sends no User-Agent and Adoptium/GitHub 403 such requests.
+    req = urllib.request.Request(url, headers={{'User-Agent': 'tpcdi-remote-seed/1'}})
+    with urllib.request.urlopen(req) as r, open(dst, 'wb') as out:
+        shutil.copyfileobj(r, out)
+
 def run_tee(cmd, env=None):
     say('$ ' + ' '.join(cmd))
     p = subprocess.Popen(cmd, env=env, text=True, stdout=subprocess.PIPE,
@@ -137,14 +143,14 @@ try:
 
     if not glob.glob('jdk/*/bin/java'):
         say('downloading portable JDK 8 (Adoptium) ...')
-        urllib.request.urlretrieve(CFG['jdk_url'], 'jdk8.tgz')
+        fetch(CFG['jdk_url'], 'jdk8.tgz')
         untar('jdk8.tgz', 'jdk')
         os.remove('jdk8.tgz')
     os.environ['PATH'] = os.path.abspath(glob.glob('jdk/*/bin')[0]) + os.pathsep + os.environ['PATH']
     run_tee(['java', '-version'])
 
     say('fetching djouallah/tpcdi @ ' + CFG['ref'])
-    urllib.request.urlretrieve(CFG['repo_url'], 'repo.tgz')
+    fetch(CFG['repo_url'], 'repo.tgz')
     shutil.rmtree('repo', ignore_errors=True)
     untar('repo.tgz', 'repo')
     os.remove('repo.tgz')
