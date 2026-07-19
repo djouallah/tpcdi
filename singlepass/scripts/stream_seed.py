@@ -49,6 +49,7 @@ import duckrun
 # generate_data (PDGF driver) lives beside this script.
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import fix_audit_key  # noqa: E402
 import generate_data as gd  # noqa: E402
 import seed_manifest as sm  # noqa: E402
 
@@ -118,12 +119,27 @@ def main():
     ap.add_argument("--staging", default=os.environ.get("TPCDI_STAGING", "./staging"))
     ap.add_argument("--work", default=os.environ.get("TPCDI_WORK", "./_tpcdi_work"))
     ap.add_argument("--tables", nargs="*", default=None, help="subset of TABLES (default: all)")
+    ap.add_argument("--remote", choices=["auto", "local", "remote"],
+                    default=os.environ.get("TPCDI_REMOTE_SEED", "auto"),
+                    help="where generation runs: 'remote' = on Fabric compute (remote_seed.py "
+                         "notebook, ~135 GiB work disk); 'auto' (default) goes remote for "
+                         "sf > 370 OneLake seeds — beyond the measured runner-disk ceiling, "
+                         "where the largest single table no longer fits ~14 GiB — else local")
     args = ap.parse_args()
 
     if args.sf < 3:
         sys.exit("ERROR: TPC-DI minimum scale factor is 3")
     if not args.warehouse:
         sys.exit("ERROR: --warehouse (or WAREHOUSE_PATH) required")
+
+    # Above the runner's disk ceiling the whole generate→upload loop moves to Fabric compute;
+    # the remote notebook re-enters this script with --remote local. Resumability is identical
+    # (same per-table manifests in OneLake, wherever the generator runs).
+    if args.remote == "remote" or (
+            args.remote == "auto" and args.warehouse.startswith("abfss://") and args.sf > 370):
+        import remote_seed
+        remote_seed.launch(args.sf, args.prefix, args.warehouse)
+        return
 
     staging = os.path.abspath(args.staging)
     chunk = int(os.environ.get("TPCDI_CM_CHUNK", "20000"))
@@ -155,6 +171,10 @@ def main():
             gd._run_digen(datagen, args.sf, staging, tables=[tbl])
             if tbl == "CustomerMgmt":
                 gd._split_customermgmt(os.path.join(staging, "Batch1"), chunk)
+            if tbl == "Customer":
+                # PDGF's hard-coded audit config emits phantom DOB alert counts the data can't
+                # reproduce (djouallah/tpcdi#1) — repair the key from the data before upload.
+                fix_audit_key.repair_seed_root(staging)
             files = _staged_files(staging)
             _upload(args.warehouse, staging, args.prefix, present)
             if onelake:
