@@ -41,7 +41,7 @@ on:
         # Not reproducible at sf>=10.
         description: "TPC-DI scale factor (upstream-validated values only)"
         type: choice
-        options: ["10", "100", "1000", "5000", "10000", "20000"]
+        options: ["10", "20", "100", "1000", "5000", "10000", "20000"]
         default: "10"
       rebuild:
         description: "Force a full warehouse rebuild (else reuse an already-built warehouse and only re-audit)"
@@ -82,8 +82,11 @@ jobs:
       LH_NAME: tpcdi
       # Sequential warehouse schema — sibling of the single-pass tpcdi<SF>.
       DBT_SCHEMA: tpcdi${{ inputs.scale_factor || vars.TPCDI_SF || '10' }}_seq
-      # Where run.py executes dbt: auto = Fabric compute (RemoteRunner) for sf>=100.
+      # Where run.py executes dbt + the audit: auto = Fabric compute (RemoteRunner) for
+      # sf>=100. The same input also forces the SEED remote (auto = remote only above sf370),
+      # so remote=remote exercises every remote path at any SF.
       TPCDI_REMOTE: ${{ inputs.remote || 'auto' }}
+      TPCDI_REMOTE_SEED: ${{ inputs.remote || 'auto' }}
       # Line-buffer python stdout so the remote dbt log STREAMS into the step live —
       # block-buffered pipes hold the '[remote] …' tail lines back for minutes.
       PYTHONUNBUFFERED: '1'

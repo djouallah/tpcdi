@@ -4,8 +4,8 @@
 # spinner stuck at "in_progress" in the UI (it drops the step-completion event on slow steps).
 # >=0.3.27: workspace API (create_lakehouse / lakehouse_id) + self-acquired OneLake tokens —
 # the workflows create the lakehouse and authenticate with no azure/login or az CLI steps.
-# TEMPORARY git pin: remote-job poll fixes (duckrun#11) + live dbt log streaming (duckrun#12)
-# are merged but not yet on PyPI — pinned to the #12 merge commit until the next release,
-# then revert to duckrun>=0.4.25.
-duckrun @ git+https://github.com/djouallah/duckrun.git@6e6e778
+# TEMPORARY git pin: remote poll fixes (#11), live log streaming (#12) and run_python +
+# workspace folders (#13) are merged but not yet on PyPI — pinned to the #13 merge commit
+# until the next release, then revert to duckrun>=0.4.25.
+duckrun @ git+https://github.com/djouallah/duckrun.git@7043903
 obstore
