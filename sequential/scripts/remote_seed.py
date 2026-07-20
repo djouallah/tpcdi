@@ -203,12 +203,14 @@ def launch_task(name: str, cfg: dict, cores: int) -> None:
     _delete_result(warehouse, cfg["result"])
 
     # A job that fails WITHOUT writing the result JSON never ran our code — a session-level
-    # failure (typically transient capacity contention: another Fabric job holding the
-    # vCores). Those get one delayed retry. A job that wrote {ok: false} really ran and
-    # really failed — never retried.
+    # failure. Observed cause: capacity throttling right after a heavy phase (the audit always
+    # launches on the heels of a long dbt run) rejects new sessions for a while — so the
+    # retries back off long enough to outlive the throttle window, not just a blip. A job that
+    # wrote {ok: false} really ran and really failed — never retried.
     import time
-    for attempt in (1, 2):
-        print(f">> running {name} on Fabric compute (attempt {attempt}/2; kept after the "
+    delays = {1: 180, 2: 600}
+    for attempt in (1, 2, 3):
+        print(f">> running {name} on Fabric compute (attempt {attempt}/3; kept after the "
               "run — see the Fabric UI for live output) ...", flush=True)
         job_err = None
         try:
@@ -228,10 +230,10 @@ def launch_task(name: str, cfg: dict, cores: int) -> None:
                 print(f">> remote {cfg['label']} SUCCEEDED", flush=True)
                 return
             sys.exit(f">> remote {cfg['label']} FAILED — see the remote log above")
-        if attempt == 1:
-            print(f">> job died before the task ran ({job_err}) — likely transient capacity "
-                  "contention; retrying in 120s", flush=True)
-            time.sleep(120)
+        if attempt in delays:
+            print(f">> job died before the task ran ({job_err}) — likely capacity "
+                  f"throttling/contention; retrying in {delays[attempt]}s", flush=True)
+            time.sleep(delays[attempt])
     # Session died before our code ran on both attempts — KEEP the notebook: its snapshot is
     # the only forensic evidence there is.
     print(f">> notebook {name} kept in the workspace for diagnosis", flush=True)
