@@ -87,9 +87,12 @@ def build_task_notebook(cfg: dict, cores: int) -> dict:
     ``env`` (extra vars for the subprocess), ``need_jdk``, ``workdir``, ``result``
     (OneLake object path of the result JSON), ``label`` (log prefix)."""
     cfg = dict(cfg, jdk_url=JDK8_URL)
+    # NB: embed the config as a PYTHON literal (repr), not json.dumps — JSON renders booleans
+    # as false/true, which are NameErrors in Python (found the hard way: every notebook with
+    # need_jdk in its config died on line 2 before it could log anything).
     work = f"""\
 import glob, io, json, os, re, shutil, subprocess, sys, tarfile, traceback, urllib.request
-CFG = {json.dumps(cfg)}
+CFG = {cfg!r}
 LOG = io.StringIO()
 
 def say(msg):
