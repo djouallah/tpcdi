@@ -83,6 +83,8 @@ jobs:
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       # The azure extension's default transport fails the OneLake TLS handshake on the runner.
       AZURE_TRANSPORT_OPTION_TYPE: curl
+      # Line-buffer python stdout so remote/task logs stream into the step live.
+      PYTHONUNBUFFERED: '1'
     steps:
       - uses: actions/checkout@v4
       - name: Show runner disk (capacity is the real per-table-streaming ceiling — largest single table must fit)
